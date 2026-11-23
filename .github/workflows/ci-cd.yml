@@ -65,10 +65,12 @@ jobs:
         run: |
           mkdir -p lib
           if [ ! -f lib/amplify_outputs.dart ]; then
-            echo 'const amplifyconfig = r"{}";' > lib/amplify_outputs.dart
+            echo 'const amplifyConfig = r"{}";' > lib/amplify_outputs.dart
+            echo 'const amplifyconfig = amplifyConfig;' >> lib/amplify_outputs.dart
           fi
           if [ ! -f lib/amplifyconfiguration.dart ]; then
-            echo 'const amplifyconfig = r"{}";' > lib/amplifyconfiguration.dart
+            echo 'const amplifyConfig = r"{}";' > lib/amplifyconfiguration.dart
+            echo 'const amplifyconfig = amplifyConfig;' >> lib/amplifyconfiguration.dart
           fi
 
       - name: Install Flutter Dependencies
