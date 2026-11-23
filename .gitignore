@@ -1,0 +1,42 @@
+# Node / Web dependencies & build
+node_modules/
+.pnp
+.pnp.js
+dist/
+dist-ssr/
+*.local
+
+# Amplify Gen 2 outputs
+.amplify/
+amplify_outputs*
+amplifyconfiguration*
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+*.lock.db
+
+# Android / iOS local configs
+**/android/.gradle
+**/android/local.properties
+**/android/app/build
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
