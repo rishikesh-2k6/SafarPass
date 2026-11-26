@@ -34,7 +34,11 @@
     "vite": "^8.3.6"
   },
   "optionalDependencies": {
-    "@parcel/watcher-linux-x64-glibc": "^2.5.0"
+    "@esbuild/linux-x64": "0.28.2",
+    "@oxlint/binding-linux-x64-gnu": "1.94.0",
+    "@parcel/watcher-linux-x64-glibc": "2.6.0",
+    "@rolldown/binding-linux-x64-gnu": "1.2.19",
+    "lightningcss-linux-x64-gnu": "1.33.0"
   },
   "overrides": {
     "@opentelemetry/core": "^2.0.0"
