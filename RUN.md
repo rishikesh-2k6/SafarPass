@@ -213,11 +213,17 @@ npx ampx sandbox
 - Provisions a dedicated, isolated cloud sandbox on AWS with AppSync GraphQL and DynamoDB.
 - Generates an updated `amplify_outputs.json`.
 
-### Cloud Pipeline Deployment (CI/CD)
-To deploy backend updates headlessly in a CI/CD pipeline:
+### Cloud Pipeline Deployment (CI/CD & Amplify Hosting)
+Amplify Hosting uses the monorepo build specification in `amplify.yml` (`appRoot: admin_web`) and custom HTTP headers in `customHttp.yml`:
 ```powershell
 npx ampx pipeline-deploy --branch $AWS_BRANCH --app-id $AWS_APP_ID
 ```
+
+#### SPA Rewrite Rule in AWS Amplify Console
+Because `admin_web` is a React Single-Page Application (SPA), configure the following rule under **Amplify Console &gt; Hosting &gt; Rewrites and redirects** so direct URL refreshes do not 404:
+- **Source address**: `/<*>`
+- **Target address**: `/index.html`
+- **Type**: `200 (Rewrite)` (or `404 (Rewrite)`)
 
 ---
 

@@ -5,7 +5,9 @@ import outputs from '../amplify_outputs.json';
 import './index.css';
 import App from './App.tsx';
 
-Amplify.configure(outputs);
+if (outputs && ('data' in outputs || 'auth' in outputs)) {
+  Amplify.configure(outputs);
+}
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
