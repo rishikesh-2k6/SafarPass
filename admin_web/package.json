@@ -34,6 +34,9 @@
     "typescript": "^5.9.3",
     "vite": "^8.3.6"
   },
+  "optionalDependencies": {
+    "@parcel/watcher-linux-x64-glibc": "^2.5.0"
+  },
   "overrides": {
     "@opentelemetry/core": "^2.0.0"
   }

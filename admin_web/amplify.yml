@@ -3,8 +3,9 @@ backend:
   phases:
     build:
       commands:
-        - nvm use 20 || nvm use 22 || true
-        - npm install --cache .npm --prefer-offline
+        - nvm use 22 || nvm use 20 || true
+        - npm install --cache .npm --include=optional
+        - npm install @parcel/watcher-linux-x64-glibc
         - npx ampx pipeline-deploy --branch $AWS_BRANCH --app-id $AWS_APP_ID
 frontend:
   phases:
@@ -18,4 +19,3 @@ frontend:
   cache:
     paths:
       - .npm/**/*
-      - node_modules/**/*
