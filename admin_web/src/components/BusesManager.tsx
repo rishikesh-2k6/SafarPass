@@ -28,12 +28,14 @@ interface BusesManagerProps {
   onAddBus: (bus: {
     busId: string;
     routeName: string;
+    destination?: string;
     capacity: number;
     qrSecret: string;
   }) => Promise<void>;
   onUpdateBus: (bus: {
     busId: string;
     routeName: string;
+    destination?: string;
     capacity: number;
   }) => Promise<void>;
   onRotateSecret: (busId: string) => Promise<string>;
@@ -56,6 +58,7 @@ export const BusesManager: FC<BusesManagerProps> = ({
   // Form states
   const [formBusId, setFormBusId] = useState('');
   const [formRouteName, setFormRouteName] = useState('');
+  const [formDestination, setFormDestination] = useState('');
   const [formCapacity, setFormCapacity] = useState('45');
   const [formQrSecret, setFormQrSecret] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -88,6 +91,7 @@ export const BusesManager: FC<BusesManagerProps> = ({
     const defaultId = `BUS_0${nextBusNum}`;
     setFormBusId(defaultId);
     setFormRouteName('');
+    setFormDestination('');
     setFormCapacity('45');
     setFormQrSecret(generateRandomSecret(defaultId));
     setIsModalOpen(true);
@@ -97,6 +101,7 @@ export const BusesManager: FC<BusesManagerProps> = ({
     setEditingBus(bus);
     setFormBusId(bus.busId);
     setFormRouteName(bus.routeName);
+    setFormDestination(bus.destination ?? '');
     setFormCapacity(String(bus.capacity ?? 45));
     setFormQrSecret(bus.qrSecret);
     setIsModalOpen(true);
@@ -113,12 +118,14 @@ export const BusesManager: FC<BusesManagerProps> = ({
       return;
     }
 
+    const cleanDest = formDestination.trim() || undefined;
     try {
       setIsSubmitting(true);
       if (editingBus) {
         await onUpdateBus({
           busId: editingBus.busId,
           routeName: cleanRoute,
+          destination: cleanDest,
           capacity: Math.min(Math.max(parseInt(formCapacity, 10) || 45, 1), 120),
         });
         showToast(`Bus ${editingBus.busId} updated successfully`);
@@ -126,6 +133,7 @@ export const BusesManager: FC<BusesManagerProps> = ({
         await onAddBus({
           busId: cleanId,
           routeName: cleanRoute,
+          destination: cleanDest,
           capacity: Math.min(Math.max(parseInt(formCapacity, 10) || 45, 1), 120),
           qrSecret: formQrSecret.trim() || generateRandomSecret(cleanId),
         });
@@ -281,6 +289,9 @@ export const BusesManager: FC<BusesManagerProps> = ({
                       </h3>
                       <p className="text-xs text-slate-400 line-clamp-1">
                         {bus.routeName}
+                      </p>
+                      <p className="text-[11px] text-emerald-400/90 line-clamp-1 mt-0.5">
+                        Dest: {bus.destination || 'Not assigned'}
                       </p>
                     </div>
                   </div>
@@ -467,6 +478,16 @@ export const BusesManager: FC<BusesManagerProps> = ({
                   placeholder="e.g. North City & Tech Park Express"
                   value={formRouteName}
                   onChange={(e) => setFormRouteName(e.target.value)}
+                />
+              </div>
+
+              <div className="form-group">
+                <label>Current Destination</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Main Campus Gate / Vijayawada"
+                  value={formDestination}
+                  onChange={(e) => setFormDestination(e.target.value)}
                 />
               </div>
 

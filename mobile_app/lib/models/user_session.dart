@@ -8,6 +8,7 @@ class UserSession {
   final String? parentOfStudentId;
   final bool feePaid;
   final String routeName;
+  final String? destination;
   final int busCapacity;
   final String? qrSecret;
 
@@ -27,6 +28,7 @@ class UserSession {
     this.parentOfStudentId,
     required this.feePaid,
     required this.routeName,
+    this.destination,
     required this.busCapacity,
     this.qrSecret,
     this.wardLoginId,
@@ -53,6 +55,7 @@ class UserSession {
       parentOfStudentId: user['parentOfStudentId'] as String?,
       feePaid: user['feePaid'] as bool? ?? true,
       routeName: (bus?['routeName'] as String?) ?? 'Campus Transit Route',
+      destination: bus?['destination'] as String?,
       busCapacity: (bus?['capacity'] as num?)?.toInt() ?? 45,
       qrSecret: bus?['qrSecret'] as String?,
       wardLoginId: ward?['loginId'] as String? ?? user['parentOfStudentId'] as String?,

@@ -19,22 +19,27 @@ class DriverScreen extends StatefulWidget {
 class _DriverScreenState extends State<DriverScreen> {
   late final DriverTelemetryService _telemetryService;
   final FlutterTts _flutterTts = FlutterTts();
+  late final TextEditingController _destinationController;
 
   bool _isTripActive = false;
   bool _isLoading = false;
   bool _simulateMovement = false;
   String _currentQrPayload = '';
+  String _currentDestination = '';
   int _boardedCount = 0;
   int _previousBoardedCount = 0;
 
   StreamSubscription<String>? _qrSub;
   StreamSubscription<int>? _boardedSub;
   StreamSubscription<bool>? _tripStateSub;
+  StreamSubscription<String>? _destSub;
 
   @override
   void initState() {
     super.initState();
     _telemetryService = DriverTelemetryService(session: widget.session);
+    _currentDestination = widget.session.destination ?? '';
+    _destinationController = TextEditingController(text: _currentDestination);
     _initWakelockAndTts();
     _setupListeners();
   }
@@ -77,6 +82,15 @@ class _DriverScreenState extends State<DriverScreen> {
       }
     });
 
+    _destSub = _telemetryService.destinationStream.listen((dest) {
+      if (mounted) {
+        setState(() {
+          _currentDestination = dest;
+          _destinationController.text = dest;
+        });
+      }
+    });
+
     _tripStateSub = _telemetryService.tripStateStream.listen((isActive) {
       if (mounted) {
         final bool wasActive = _isTripActive;
@@ -113,11 +127,13 @@ class _DriverScreenState extends State<DriverScreen> {
 
     try {
       _telemetryService.simulateMovement = _simulateMovement;
-      await _telemetryService.startTrip();
+      final String destText = _destinationController.text.trim();
+      await _telemetryService.startTrip(destination: destText);
       if (mounted) {
         setState(() {
           _isTripActive = true;
           _currentQrPayload = _telemetryService.currentQrPayload;
+          _currentDestination = _telemetryService.currentDestination;
           _boardedCount = _telemetryService.boardedCount;
           _previousBoardedCount = _boardedCount;
         });
@@ -131,6 +147,63 @@ class _DriverScreenState extends State<DriverScreen> {
         setState(() {
           _isLoading = false;
         });
+      }
+    }
+  }
+
+  Future<void> _handleEditDestination() async {
+    final controller = TextEditingController(text: _currentDestination);
+    final String? nextDest = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Update Bus Destination'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Destination',
+            hintText: 'e.g. Main Campus Gate / City Center',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF10B981),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+
+    if (nextDest == null || nextDest.isEmpty) return;
+
+    try {
+      await _telemetryService.updateDestination(nextDest);
+      if (mounted) {
+        setState(() {
+          _currentDestination = _telemetryService.currentDestination;
+          _destinationController.text = _currentDestination;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: const Color(0xFF10B981),
+            content: Text('Destination updated to "$nextDest"'),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to update destination: $e')),
+        );
       }
     }
   }
@@ -338,6 +411,8 @@ class _DriverScreenState extends State<DriverScreen> {
     _qrSub?.cancel();
     _boardedSub?.cancel();
     _tripStateSub?.cancel();
+    _destSub?.cancel();
+    _destinationController.dispose();
     _telemetryService.dispose();
     _flutterTts.stop();
     try {
@@ -432,7 +507,7 @@ class _DriverScreenState extends State<DriverScreen> {
           children: [
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 28),
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(20),
@@ -498,10 +573,26 @@ class _DriverScreenState extends State<DriverScreen> {
                       color: Color(0xFF64748B),
                     ),
                   ),
-                  const SizedBox(height: 32),
+                  const SizedBox(height: 20),
+
+                  // Destination Input before starting trip
+                  TextField(
+                    controller: _destinationController,
+                    textInputAction: TextInputAction.done,
+                    decoration: const InputDecoration(
+                      prefixIcon: Icon(Icons.location_on_rounded,
+                          size: 20, color: Color(0xFF10B981)),
+                      labelText: 'Bus Destination',
+                      hintText: 'e.g. Main Campus Gate / Vijayawada',
+                      hintStyle:
+                          TextStyle(fontSize: 13, color: Color(0xFF94A3B8)),
+                    ),
+                  ),
+                  const SizedBox(height: 26),
+
                   Container(
-                    width: 190,
-                    height: 190,
+                    width: 185,
+                    height: 185,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       gradient: const LinearGradient(
@@ -529,7 +620,7 @@ class _DriverScreenState extends State<DriverScreen> {
                           children: [
                             Icon(
                               Icons.directions_bus_rounded,
-                              size: 64,
+                              size: 62,
                               color: Colors.white,
                             ),
                             SizedBox(height: 10),
@@ -547,7 +638,7 @@ class _DriverScreenState extends State<DriverScreen> {
                       ),
                     ),
                   ),
-                  const SizedBox(height: 28),
+                  const SizedBox(height: 24),
                   Text(
                     'Tap to broadcast live telemetry & activate attendance',
                     textAlign: TextAlign.center,
@@ -657,6 +748,58 @@ class _DriverScreenState extends State<DriverScreen> {
                       ),
                     ),
                   ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+
+          // Live Destination Banner with inline Edit
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFFE2E8F0)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.location_on_rounded,
+                    size: 18, color: Color(0xFF10B981)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'CURRENT DESTINATION',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF64748B),
+                          letterSpacing: 0.6,
+                        ),
+                      ),
+                      Text(
+                        _currentDestination.isNotEmpty
+                            ? _currentDestination
+                            : 'Tap Edit to set bus destination',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: _currentDestination.isNotEmpty
+                              ? const Color(0xFF0F172A)
+                              : const Color(0xFF94A3B8),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: _handleEditDestination,
+                  icon: const Icon(Icons.edit_rounded, size: 15),
+                  label: const Text('Edit'),
                 ),
               ],
             ),

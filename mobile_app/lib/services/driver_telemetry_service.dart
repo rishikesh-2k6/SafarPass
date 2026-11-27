@@ -16,7 +16,9 @@ class DriverTelemetryService {
   String get driverId => session.loginId;
   String get _qrSecret => session.qrSecret ?? '';
 
-  DriverTelemetryService({required this.session});
+  DriverTelemetryService({required this.session}) {
+    currentDestination = session.destination ?? '';
+  }
 
   static const List<Map<String, double>> simulatedCampusCoordinates = [
     {'lat': 16.4632, 'lng': 80.5064, 'speed': 20.0, 'heading': 45.0},
@@ -32,6 +34,7 @@ class DriverTelemetryService {
   String? activeTripId;
   bool isTripActive = false;
   String currentQrPayload = '';
+  String currentDestination = '';
   int boardedCount = 0;
 
   double currentLat = 16.4632;
@@ -51,6 +54,8 @@ class DriverTelemetryService {
     if (value) {
       _positionSubscription?.cancel();
       _positionSubscription = null;
+      _gpsWatchdogTimer?.cancel();
+      _gpsWatchdogTimer = null;
       gpsStatus.value = 'Simulated Campus Loop';
       _startSimulatedTimer();
     } else {
@@ -62,6 +67,7 @@ class DriverTelemetryService {
 
   int _simulatedIndex = 0;
   Timer? _simulatedTimer;
+  Timer? _gpsWatchdogTimer;
   Timer? _qrTimer;
   StreamSubscription<Position>? _positionSubscription;
   StreamSubscription<GraphQLResponse<String>>? _subscription;
@@ -74,10 +80,13 @@ class DriverTelemetryService {
       StreamController<int>.broadcast();
   final StreamController<bool> _tripStateStreamController =
       StreamController<bool>.broadcast();
+  final StreamController<String> _destinationStreamController =
+      StreamController<String>.broadcast();
 
   Stream<String> get qrStream => _qrStreamController.stream;
   Stream<int> get boardedCountStream => _boardedCountStreamController.stream;
   Stream<bool> get tripStateStream => _tripStateStreamController.stream;
+  Stream<String> get destinationStream => _destinationStreamController.stream;
 
   void Function(int count)? onBoardedCountChanged;
   void Function(String qrPayload)? onQrPayloadChanged;
@@ -116,6 +125,32 @@ class DriverTelemetryService {
     }
   }
 
+  Future<void> _captureInitialRealGps() async {
+    try {
+      final Position pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 5),
+        ),
+      );
+      currentLat = pos.latitude;
+      currentLng = pos.longitude;
+      currentSpeed = (pos.speed * 3.6).clamp(0.0, 120.0);
+      currentHeading = pos.heading;
+      if (!_isDisposed) {
+        gpsStatus.value = 'Live GPS (±${pos.accuracy.toStringAsFixed(0)}m)';
+      }
+    } catch (_) {
+      try {
+        final Position? last = await Geolocator.getLastKnownPosition();
+        if (last != null) {
+          currentLat = last.latitude;
+          currentLng = last.longitude;
+        }
+      } catch (_) {}
+    }
+  }
+
   Future<Map<String, dynamic>?> _invokeDriverTripAction({
     required String action,
     String? tripId,
@@ -123,6 +158,7 @@ class DriverTelemetryService {
     double? lng,
     double? speed,
     double? heading,
+    String? destination,
   }) async {
     const String mutation = r'''
       mutation DriverTripAction(
@@ -133,6 +169,7 @@ class DriverTelemetryService {
         $lng: Float
         $speed: Float
         $heading: Float
+        $destination: String
       ) {
         driverTripAction(
           sessionToken: $sessionToken
@@ -142,6 +179,7 @@ class DriverTelemetryService {
           lng: $lng
           speed: $speed
           heading: $heading
+          destination: $destination
         )
       }
     ''';
@@ -156,6 +194,7 @@ class DriverTelemetryService {
         'lng': ?lng,
         'speed': ?speed,
         'heading': ?heading,
+        'destination': ?destination,
       },
       authorizationMode: APIAuthorizationType.apiKey,
     );
@@ -171,19 +210,23 @@ class DriverTelemetryService {
     return decodeAwsJsonPayload(outer?['driverTripAction']);
   }
 
-  Future<void> startTrip() async {
+  Future<void> startTrip({String? destination}) async {
     if (_qrSecret.isEmpty) {
       throw 'Missing Bus QR signing secret for $busId. Contact fleet admin.';
     }
 
     if (!_simulateMovement) {
       await ensureLocationPermission();
+      await _captureInitialRealGps();
     }
+
+    final String cleanDest = (destination ?? currentDestination).trim();
 
     final Map<String, dynamic>? result = await _invokeDriverTripAction(
       action: 'start',
       lat: currentLat,
       lng: currentLng,
+      destination: cleanDest.isNotEmpty ? cleanDest : null,
     );
 
     if (result == null || result['success'] != true) {
@@ -195,11 +238,19 @@ class DriverTelemetryService {
       throw 'Server did not return an active tripId.';
     }
 
+    final String? serverDest = result['destination'] as String?;
+    if (serverDest != null && serverDest.isNotEmpty) {
+      currentDestination = serverDest;
+    } else if (cleanDest.isNotEmpty) {
+      currentDestination = cleanDest;
+    }
+
     isTripActive = true;
     boardedCount = (result['boardedCount'] as num?)?.toInt() ?? 0;
     if (!_isDisposed) {
       _boardedCountStreamController.add(boardedCount);
       _tripStateStreamController.add(true);
+      _destinationStreamController.add(currentDestination);
     }
     onTripStateChanged?.call(true);
 
@@ -219,12 +270,41 @@ class DriverTelemetryService {
     _subscribeToBusLocationUpdates();
   }
 
+  Future<void> updateDestination(String destination) async {
+    final String clean = destination.trim();
+    if (clean.isEmpty) throw 'Destination cannot be empty.';
+    if (!isTripActive || activeTripId == null) {
+      currentDestination = clean;
+      if (!_isDisposed) _destinationStreamController.add(clean);
+      return;
+    }
+
+    final Map<String, dynamic>? res = await _invokeDriverTripAction(
+      action: 'destination',
+      tripId: activeTripId,
+      destination: clean,
+    );
+    if (res == null || res['success'] != true) {
+      throw res?['message'] as String? ?? 'Failed to update destination.';
+    }
+    currentDestination = (res['destination'] as String?) ?? clean;
+    if (!_isDisposed) {
+      _destinationStreamController.add(currentDestination);
+    }
+  }
+
   void _startGpsStream() {
     _positionSubscription?.cancel();
     _positionSubscription = null;
+    _gpsWatchdogTimer?.cancel();
     gpsStatus.value = 'Acquiring GPS signal...';
 
-    LocationSettings locationSettings;
+    const LocationSettings baseSettings = LocationSettings(
+      accuracy: LocationAccuracy.bestForNavigation,
+      distanceFilter: 0,
+    );
+
+    LocationSettings locationSettings = baseSettings;
     if (defaultTargetPlatform == TargetPlatform.android) {
       locationSettings = AndroidSettings(
         accuracy: LocationAccuracy.bestForNavigation,
@@ -236,44 +316,71 @@ class DriverTelemetryService {
           enableWakeLock: true,
         ),
       );
-    } else {
-      locationSettings = const LocationSettings(
-        accuracy: LocationAccuracy.bestForNavigation,
-        distanceFilter: 0,
+    }
+
+    void attachStream(LocationSettings settings, {bool canFallback = true}) {
+      _positionSubscription = Geolocator.getPositionStream(
+        locationSettings: settings,
+      ).listen(
+        (Position pos) {
+          _handleNewPosition(pos);
+        },
+        onError: (err) {
+          safePrint('getPositionStream error: $err');
+          if (canFallback && defaultTargetPlatform == TargetPlatform.android) {
+            _positionSubscription?.cancel();
+            attachStream(baseSettings, canFallback: false);
+          } else if (!_isDisposed) {
+            gpsStatus.value = 'GPS Error: retrying...';
+          }
+        },
       );
     }
 
-    _positionSubscription = Geolocator.getPositionStream(
-      locationSettings: locationSettings,
-    ).listen(
-      (Position pos) {
-        currentLat = pos.latitude;
-        currentLng = pos.longitude;
-        currentSpeed = (pos.speed * 3.6).clamp(0.0, 120.0);
-        currentHeading = pos.heading;
-        if (!_isDisposed) {
-          gpsStatus.value = 'Live GPS (±${pos.accuracy.toStringAsFixed(0)}m)';
-        }
+    attachStream(locationSettings);
 
-        final DateTime now = DateTime.now();
-        if (_lastGpsMutationTime == null ||
-            now.difference(_lastGpsMutationTime!).inMilliseconds >= 3000) {
-          _lastGpsMutationTime = now;
-          _sendBusLocationMutation(
-            currentLat,
-            currentLng,
-            currentSpeed,
-            currentHeading,
+    // Watchdog timer: ensures GPS still broadcasts every 4s even if OS/OEM
+    // battery rules pause the continuous stream while stationary or indoors.
+    _gpsWatchdogTimer = Timer.periodic(const Duration(seconds: 4), (_) async {
+      if (_isDisposed || !isTripActive || _simulateMovement) return;
+      final DateTime now = DateTime.now();
+      if (_lastGpsMutationTime == null ||
+          now.difference(_lastGpsMutationTime!).inMilliseconds >= 4000) {
+        try {
+          final Position pos = await Geolocator.getCurrentPosition(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.high,
+              timeLimit: Duration(seconds: 3),
+            ),
           );
+          _handleNewPosition(pos);
+        } catch (e) {
+          safePrint('Watchdog GPS poll fallback skipped: $e');
         }
-      },
-      onError: (err) {
-        if (!_isDisposed) {
-          gpsStatus.value = 'GPS Error: $err';
-        }
-        safePrint('getPositionStream error: $err');
-      },
-    );
+      }
+    });
+  }
+
+  void _handleNewPosition(Position pos) {
+    currentLat = pos.latitude;
+    currentLng = pos.longitude;
+    currentSpeed = (pos.speed * 3.6).clamp(0.0, 120.0);
+    currentHeading = pos.heading;
+    if (!_isDisposed) {
+      gpsStatus.value = 'Live GPS (±${pos.accuracy.toStringAsFixed(0)}m)';
+    }
+
+    final DateTime now = DateTime.now();
+    if (_lastGpsMutationTime == null ||
+        now.difference(_lastGpsMutationTime!).inMilliseconds >= 2800) {
+      _lastGpsMutationTime = now;
+      _sendBusLocationMutation(
+        currentLat,
+        currentLng,
+        currentSpeed,
+        currentHeading,
+      );
+    }
   }
 
   void _startSimulatedTimer() {
@@ -332,6 +439,14 @@ class DriverTelemetryService {
         return;
       }
 
+      final String? serverDest = result['destination'] as String?;
+      if (serverDest != null && serverDest != currentDestination) {
+        currentDestination = serverDest;
+        if (!_isDisposed) {
+          _destinationStreamController.add(currentDestination);
+        }
+      }
+
       final int? serverCount = (result['boardedCount'] as num?)?.toInt();
       if (serverCount != null && serverCount != boardedCount) {
         boardedCount = serverCount;
@@ -374,6 +489,7 @@ class DriverTelemetryService {
           speed
           heading
           boardedCount
+          destination
         }
       }
     ''';
@@ -405,6 +521,13 @@ class DriverTelemetryService {
                   }
                   onBoardedCountChanged?.call(boardedCount);
                 }
+                final String? newDest = loc['destination'] as String?;
+                if (newDest != null && newDest != currentDestination) {
+                  currentDestination = newDest;
+                  if (!_isDisposed) {
+                    _destinationStreamController.add(currentDestination);
+                  }
+                }
               }
             } catch (e) {
               safePrint('Error decoding subscription payload: $e');
@@ -432,6 +555,8 @@ class DriverTelemetryService {
   void _stopLocalTimers() {
     _positionSubscription?.cancel();
     _positionSubscription = null;
+    _gpsWatchdogTimer?.cancel();
+    _gpsWatchdogTimer = null;
     _simulatedTimer?.cancel();
     _simulatedTimer = null;
     _qrTimer?.cancel();
@@ -473,5 +598,6 @@ class DriverTelemetryService {
     _qrStreamController.close();
     _boardedCountStreamController.close();
     _tripStateStreamController.close();
+    _destinationStreamController.close();
   }
 }

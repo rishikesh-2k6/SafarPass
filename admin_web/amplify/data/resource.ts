@@ -18,6 +18,7 @@ const schema = a
       .model({
         busId: a.id().required(),
         routeName: a.string().required(),
+        destination: a.string(),
         capacity: a.integer().default(45),
         qrSecret: a.string().required(),
         isActive: a.boolean().default(true),
@@ -48,6 +49,7 @@ const schema = a
         busId: a.string().required(),
         driverId: a.string().required(),
         status: a.string().required(),
+        destination: a.string(),
         startedAt: a.datetime(),
         endedAt: a.datetime(),
       })
@@ -67,6 +69,7 @@ const schema = a
         speed: a.float().default(0),
         heading: a.float().default(0),
         boardedCount: a.integer().default(0),
+        destination: a.string(),
       })
       .identifier(['busId'])
       .authorization((allow) => [
@@ -109,6 +112,7 @@ const schema = a
         lng: a.float(),
         speed: a.float(),
         heading: a.float(),
+        destination: a.string(),
       })
       .returns(a.json())
       .authorization((allow) => [allow.publicApiKey()])

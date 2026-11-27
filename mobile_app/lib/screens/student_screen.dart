@@ -30,6 +30,7 @@ class _StudentScreenState extends State<StudentScreen> {
   bool _isProcessingScan = false;
   bool _isSatellite = false;
   bool _isMapReady = false;
+  bool _followBus = true;
   BoardingResult? _boardingResult;
 
   String get _studentId => widget.session.loginId;
@@ -47,7 +48,7 @@ class _StudentScreenState extends State<StudentScreen> {
         setState(() {
           _busLocation = loc;
         });
-        if (_isMapReady) {
+        if (_isMapReady && _followBus) {
           _mapController.move(
             LatLng(loc.lat, loc.lng),
             _mapController.camera.zoom,
@@ -55,6 +56,18 @@ class _StudentScreenState extends State<StudentScreen> {
         }
       }
     });
+  }
+
+  Future<void> _locateBus() async {
+    setState(() {
+      _followBus = true;
+    });
+    final latest = await _boardingService.refreshLocation();
+    if (!mounted) return;
+    final target = latest ?? _busLocation;
+    if (_isMapReady) {
+      _mapController.move(LatLng(target.lat, target.lng), 16.0);
+    }
   }
 
   Future<void> _openInGoogleMaps() async {
@@ -123,6 +136,10 @@ class _StudentScreenState extends State<StudentScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final String activeDest = _busLocation.destination.isNotEmpty
+        ? _busLocation.destination
+        : (widget.session.destination ?? '');
+
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
@@ -145,7 +162,9 @@ class _StudentScreenState extends State<StudentScreen> {
                     ),
                   ),
                   Text(
-                    'Transit Pass • Bus $_assignedBusId',
+                    activeDest.isNotEmpty
+                        ? 'Bus $_assignedBusId → $activeDest'
+                        : 'Transit Pass • Bus $_assignedBusId',
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 11,
@@ -228,7 +247,7 @@ class _StudentScreenState extends State<StudentScreen> {
                   children: [
                     // Live Bus Map Card
                     Container(
-                      height: 260,
+                      height: 270,
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(16),
@@ -254,6 +273,17 @@ class _StudentScreenState extends State<StudentScreen> {
                                 initialZoom: 15.0,
                                 onMapReady: () {
                                   _isMapReady = true;
+                                  _mapController.move(
+                                    LatLng(_busLocation.lat, _busLocation.lng),
+                                    15.5,
+                                  );
+                                },
+                                onPositionChanged: (_, bool hasGesture) {
+                                  if (hasGesture && _followBus) {
+                                    setState(() {
+                                      _followBus = false;
+                                    });
+                                  }
                                 },
                               ),
                               children: [
@@ -277,7 +307,7 @@ class _StudentScreenState extends State<StudentScreen> {
                               ],
                             ),
 
-                            // Speed & status pill
+                            // Speed & status pill (top-left)
                             Positioned(
                               top: 10,
                               left: 10,
@@ -303,7 +333,7 @@ class _StudentScreenState extends State<StudentScreen> {
                                       width: 8,
                                       height: 8,
                                       decoration: BoxDecoration(
-                                        color: _busLocation.speed > 0
+                                        color: _busLocation.hasServerFix
                                             ? const Color(0xFF10B981)
                                             : Colors.amber.shade600,
                                         shape: BoxShape.circle,
@@ -323,7 +353,52 @@ class _StudentScreenState extends State<StudentScreen> {
                               ),
                             ),
 
-                            // Street / Satellite chip
+                            // Destination badge (bottom-left)
+                            if (activeDest.isNotEmpty)
+                              Positioned(
+                                bottom: 10,
+                                left: 10,
+                                right: 140,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withValues(alpha: 0.95),
+                                    borderRadius: BorderRadius.circular(14),
+                                    border: Border.all(
+                                        color: const Color(0xFFE2E8F0)),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black
+                                            .withValues(alpha: 0.08),
+                                        blurRadius: 6,
+                                        offset: const Offset(0, 2),
+                                      ),
+                                    ],
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(Icons.location_on_rounded,
+                                          size: 14, color: Color(0xFF10B981)),
+                                      const SizedBox(width: 4),
+                                      Flexible(
+                                        child: Text(
+                                          'To: $activeDest',
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold,
+                                            color: Color(0xFF0F172A),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+
+                            // Street / Satellite chip (top-right)
                             Positioned(
                               top: 10,
                               right: 10,
@@ -376,7 +451,28 @@ class _StudentScreenState extends State<StudentScreen> {
                               ),
                             ),
 
-                            // Google Maps button
+                            // Locate / Recenter on Bus Floating Button (side of map)
+                            Positioned(
+                              bottom: 52,
+                              right: 10,
+                              child: FloatingActionButton.small(
+                                heroTag: 'student_locate_bus',
+                                tooltip: 'Locate Bus',
+                                backgroundColor: _followBus
+                                    ? const Color(0xFF10B981)
+                                    : Colors.white,
+                                foregroundColor: _followBus
+                                    ? Colors.white
+                                    : const Color(0xFF0F172A),
+                                elevation: 4,
+                                onPressed: _locateBus,
+                                child: const Icon(
+                                    Icons.my_location_rounded,
+                                    size: 18),
+                              ),
+                            ),
+
+                            // Google Maps button (bottom-right)
                             Positioned(
                               bottom: 10,
                               right: 10,
@@ -628,7 +724,6 @@ class _StudentScreenState extends State<StudentScreen> {
         ),
         const SizedBox(height: 12),
 
-        // 50m GPS proximity switch (defaults OFF in production)
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
           decoration: BoxDecoration(

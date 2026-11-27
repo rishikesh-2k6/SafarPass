@@ -28,6 +28,7 @@ class _ParentScreenState extends State<ParentScreen> {
   bool _isSos = false;
   bool _isSatellite = false;
   bool _isMapReady = false;
+  bool _followBus = true;
   String? _boardedTimestamp;
   String? _activeDriverId;
 
@@ -49,7 +50,7 @@ class _ParentScreenState extends State<ParentScreen> {
         setState(() {
           _busLocation = loc;
         });
-        if (_isMapReady) {
+        if (_isMapReady && _followBus) {
           _mapController.move(
             LatLng(loc.lat, loc.lng),
             _mapController.camera.zoom,
@@ -63,6 +64,18 @@ class _ParentScreenState extends State<ParentScreen> {
       const Duration(seconds: 8),
       (_) => _refreshWardStatus(),
     );
+  }
+
+  Future<void> _locateBus() async {
+    setState(() {
+      _followBus = true;
+    });
+    final latest = await _boardingService.refreshLocation();
+    if (!mounted) return;
+    final target = latest ?? _busLocation;
+    if (_isMapReady) {
+      _mapController.move(LatLng(target.lat, target.lng), 16.0);
+    }
   }
 
   Future<void> _refreshWardStatus() async {
@@ -149,7 +162,10 @@ class _ParentScreenState extends State<ParentScreen> {
               color: Color(0xFF64748B),
               size: 20,
             ),
-            onPressed: _refreshWardStatus,
+            onPressed: () {
+              _refreshWardStatus();
+              _boardingService.refreshLocation();
+            },
           ),
           IconButton(
             tooltip: 'Logout',
@@ -211,6 +227,9 @@ class _ParentScreenState extends State<ParentScreen> {
 
   Widget _buildTopStatusCard() {
     final bool isBoarded = _isBoarded;
+    final String activeDest = _busLocation.destination.isNotEmpty
+        ? _busLocation.destination
+        : (widget.session.destination ?? '');
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -298,6 +317,18 @@ class _ParentScreenState extends State<ParentScreen> {
                     color: Color(0xFF64748B),
                   ),
                 ),
+                if (activeDest.isNotEmpty) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    'Destination: $activeDest',
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF059669),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -331,6 +362,17 @@ class _ParentScreenState extends State<ParentScreen> {
                 initialZoom: 15.0,
                 onMapReady: () {
                   _isMapReady = true;
+                  _mapController.move(
+                    LatLng(_busLocation.lat, _busLocation.lng),
+                    15.5,
+                  );
+                },
+                onPositionChanged: (_, bool hasGesture) {
+                  if (hasGesture && _followBus) {
+                    setState(() {
+                      _followBus = false;
+                    });
+                  }
                 },
               ),
               children: [
@@ -406,17 +448,13 @@ class _ParentScreenState extends State<ParentScreen> {
               right: 12,
               child: FloatingActionButton.small(
                 heroTag: 'parent_recenter',
-                backgroundColor: Colors.white,
-                foregroundColor: const Color(0xFF0F172A),
+                tooltip: 'Locate Bus',
+                backgroundColor:
+                    _followBus ? const Color(0xFF10B981) : Colors.white,
+                foregroundColor:
+                    _followBus ? Colors.white : const Color(0xFF0F172A),
                 elevation: 3,
-                onPressed: () {
-                  if (_isMapReady) {
-                    _mapController.move(
-                      LatLng(_busLocation.lat, _busLocation.lng),
-                      16.0,
-                    );
-                  }
-                },
+                onPressed: _locateBus,
                 child: const Icon(Icons.my_location_rounded, size: 18),
               ),
             ),
@@ -453,7 +491,7 @@ class _ParentScreenState extends State<ParentScreen> {
                                 width: 8,
                                 height: 8,
                                 decoration: BoxDecoration(
-                                  color: _busLocation.speed > 0
+                                  color: _busLocation.hasServerFix
                                       ? const Color(0xFF10B981)
                                       : Colors.amber.shade600,
                                   shape: BoxShape.circle,

@@ -282,6 +282,7 @@ async function handleMobileLogin(
       ? {
           busId: bus.busId,
           routeName: bus.routeName,
+          destination: bus.destination ?? null,
           capacity: bus.capacity ?? 45,
           // Only drivers need the bus HMAC key locally to mint rotating QR codes
           qrSecret: role === 'driver' ? bus.qrSecret : null,
@@ -324,10 +325,19 @@ async function handleDriverTripAction(
       ),
     );
 
+    const rawDest = typeof args.destination === 'string' ? args.destination.trim() : '';
+    const { data: busRecord } = await client.models.Bus.get({ busId });
+    const resolvedDestination = rawDest || busRecord?.destination || null;
+
+    if (rawDest && busRecord) {
+      await client.models.Bus.update({ busId, destination: rawDest });
+    }
+
     const { data: createdTrip, errors } = await client.models.Trip.create({
       busId,
       driverId,
       status: 'active',
+      destination: resolvedDestination,
       startedAt: nowIso,
     });
     if (errors?.length || !createdTrip) {
@@ -351,6 +361,7 @@ async function handleDriverTripAction(
         speed: 0,
         heading: 0,
         boardedCount: 0,
+        destination: resolvedDestination,
       });
     } else {
       await client.models.BusLocation.create({
@@ -361,6 +372,7 @@ async function handleDriverTripAction(
         speed: 0,
         heading: 0,
         boardedCount: 0,
+        destination: resolvedDestination,
       });
     }
 
@@ -368,6 +380,7 @@ async function handleDriverTripAction(
       success: true,
       tripId: createdTrip.id,
       status: 'active',
+      destination: resolvedDestination,
       boardedCount: 0,
     };
   }
@@ -400,7 +413,7 @@ async function handleDriverTripAction(
         ? ((args.heading % 360) + 360) % 360
         : 0;
 
-    const { data: updatedLoc } = await client.models.BusLocation.update({
+    let { data: updatedLoc, errors: locErrs } = await client.models.BusLocation.update({
       busId,
       tripId,
       lat: args.lat as number,
@@ -409,10 +422,46 @@ async function handleDriverTripAction(
       heading,
     });
 
+    if (locErrs?.length || !updatedLoc) {
+      const created = await client.models.BusLocation.create({
+        busId,
+        tripId,
+        lat: args.lat as number,
+        lng: args.lng as number,
+        speed,
+        heading,
+        boardedCount: 0,
+        destination: trip.destination ?? null,
+      });
+      updatedLoc = created.data;
+    }
+
     return {
       success: true,
       tripStatus: trip.status,
+      destination: updatedLoc?.destination ?? trip.destination ?? null,
       boardedCount: updatedLoc?.boardedCount ?? 0,
+    };
+  }
+
+  if (action === 'destination') {
+    if (trip.status === 'completed') {
+      return { success: false, message: 'Cannot update destination on a completed trip.' };
+    }
+    const nextDest = String(args.destination ?? '').trim();
+    if (!nextDest) {
+      return { success: false, message: 'Destination cannot be empty.' };
+    }
+    await client.models.Trip.update({ id: tripId, destination: nextDest });
+    await client.models.Bus.update({ busId, destination: nextDest });
+    const { data: existingLoc } = await client.models.BusLocation.get({ busId });
+    if (existingLoc) {
+      await client.models.BusLocation.update({ busId, destination: nextDest });
+    }
+    return {
+      success: true,
+      tripStatus: trip.status,
+      destination: nextDest,
     };
   }
 

@@ -188,16 +188,43 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
     }
   };
 
+  const handleUpdateTripDestination = async (
+    tripId: string,
+    busId: string,
+    destination: string,
+  ) => {
+    try {
+      const { errors } = await client.models.Trip.update({
+        id: tripId,
+        destination,
+      });
+      if (errors?.length) {
+        throw new Error(errors.map((e) => e.message).join(', '));
+      }
+      await client.models.Bus.update({ busId, destination });
+      const existingLoc = busLocations.find((l) => l.busId === busId);
+      if (existingLoc) {
+        await client.models.BusLocation.update({ busId, destination });
+      }
+      showToast(`Destination for ${busId} updated to "${destination}".`);
+    } catch (err) {
+      console.error('Failed to update trip destination:', err);
+      alert('Failed to update destination in DynamoDB.');
+    }
+  };
+
   // Bus Management CRUD Actions
   const handleAddBus = async (busData: {
     busId: string;
     routeName: string;
+    destination?: string;
     capacity: number;
     qrSecret: string;
   }) => {
     const { errors } = await client.models.Bus.create({
       busId: busData.busId,
       routeName: busData.routeName,
+      destination: busData.destination,
       capacity: busData.capacity,
       qrSecret: busData.qrSecret,
       isActive: true,
@@ -208,11 +235,13 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
   const handleUpdateBus = async (busData: {
     busId: string;
     routeName: string;
+    destination?: string;
     capacity: number;
   }) => {
     const { errors } = await client.models.Bus.update({
       busId: busData.busId,
       routeName: busData.routeName,
+      destination: busData.destination ?? null,
       capacity: busData.capacity,
     });
     if (errors?.length) throw new Error(errors[0].message);
@@ -673,6 +702,7 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
             busLocations={busLocations}
             buses={buses}
             onForceEndTrip={handleForceEndTrip}
+            onUpdateDestination={handleUpdateTripDestination}
           />
 
           {/* Main Grid: Map & Attendance Ledger */}
@@ -735,6 +765,11 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
                             <span className="popup-status">LIVE</span>
                           </div>
                           <div className="popup-body">
+                            {bus.destination && (
+                              <div>
+                                Dest: <strong>{bus.destination}</strong>
+                              </div>
+                            )}
                             <div>
                               Speed: <strong>{(bus.speed ?? 0).toFixed(1)} km/h</strong>
                             </div>

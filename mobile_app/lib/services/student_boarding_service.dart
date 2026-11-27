@@ -15,7 +15,9 @@ class BusLocationData {
   final double speed;
   final double heading;
   final int boardedCount;
+  final String destination;
   final DateTime updatedAt;
+  final bool hasServerFix;
 
   const BusLocationData({
     required this.busId,
@@ -25,10 +27,15 @@ class BusLocationData {
     required this.speed,
     required this.heading,
     required this.boardedCount,
+    this.destination = '',
     required this.updatedAt,
+    this.hasServerFix = false,
   });
 
-  factory BusLocationData.initial({String busId = 'BUS_01'}) {
+  factory BusLocationData.initial({
+    String busId = 'BUS_01',
+    String destination = '',
+  }) {
     return BusLocationData(
       busId: busId,
       tripId: '',
@@ -37,11 +44,14 @@ class BusLocationData {
       speed: 0.0,
       heading: 0.0,
       boardedCount: 0,
+      destination: destination,
       updatedAt: DateTime.now(),
+      hasServerFix: false,
     );
   }
 
   factory BusLocationData.fromJson(Map<String, dynamic> json) {
+    final String? updatedAtStr = json['updatedAt'] as String?;
     return BusLocationData(
       busId: json['busId'] as String? ?? 'BUS_01',
       tripId: json['tripId'] as String? ?? '',
@@ -50,7 +60,11 @@ class BusLocationData {
       speed: (json['speed'] as num?)?.toDouble() ?? 0.0,
       heading: (json['heading'] as num?)?.toDouble() ?? 0.0,
       boardedCount: (json['boardedCount'] as num?)?.toInt() ?? 0,
-      updatedAt: DateTime.now(),
+      destination: (json['destination'] as String?) ?? '',
+      updatedAt: updatedAtStr != null
+          ? (DateTime.tryParse(updatedAtStr)?.toLocal() ?? DateTime.now())
+          : DateTime.now(),
+      hasServerFix: true,
     );
   }
 }
@@ -116,11 +130,16 @@ class StudentBoardingService {
   Stream<BusLocationData> get busLocationStream =>
       _busLocationStreamController.stream;
 
-  StreamSubscription<GraphQLResponse<String>>? _locationSubscription;
+  StreamSubscription<GraphQLResponse<String>>? _updateSubscription;
+  StreamSubscription<GraphQLResponse<String>>? _createSubscription;
+  Timer? _pollingTimer;
   bool _isDisposed = false;
 
   StudentBoardingService({required this.session}) {
-    _currentBusLocation = BusLocationData.initial(busId: targetBusId);
+    _currentBusLocation = BusLocationData.initial(
+      busId: targetBusId,
+      destination: session.destination ?? '',
+    );
     initLiveLocation();
   }
 
@@ -147,6 +166,17 @@ class StudentBoardingService {
   Future<void> initLiveLocation() async {
     await fetchInitialBusLocation();
     subscribeToBusLocation();
+    _pollingTimer?.cancel();
+    // Poll every 4s alongside WebSocket so cellular drops never freeze live tracking
+    _pollingTimer = Timer.periodic(
+      const Duration(seconds: 4),
+      (_) => fetchInitialBusLocation(),
+    );
+  }
+
+  Future<BusLocationData?> refreshLocation() async {
+    await fetchInitialBusLocation();
+    return _currentBusLocation;
   }
 
   Future<void> fetchInitialBusLocation() async {
@@ -160,6 +190,8 @@ class StudentBoardingService {
           speed
           heading
           boardedCount
+          destination
+          updatedAt
         }
       }
     ''';
@@ -183,14 +215,15 @@ class StudentBoardingService {
         }
       }
     } catch (e) {
-      safePrint('Error fetching initial bus location: $e');
+      safePrint('Error fetching bus location: $e');
     }
   }
 
   void subscribeToBusLocation() {
-    _locationSubscription?.cancel();
+    _updateSubscription?.cancel();
+    _createSubscription?.cancel();
 
-    const String onUpdateBusLocationSubscription = r'''
+    const String onUpdateSub = r'''
       subscription OnUpdateBusLocation {
         onUpdateBusLocation {
           busId
@@ -200,48 +233,75 @@ class StudentBoardingService {
           speed
           heading
           boardedCount
+          destination
+          updatedAt
+        }
+      }
+    ''';
+
+    const String onCreateSub = r'''
+      subscription OnCreateBusLocation {
+        onCreateBusLocation {
+          busId
+          tripId
+          lat
+          lng
+          speed
+          heading
+          boardedCount
+          destination
+          updatedAt
         }
       }
     ''';
 
     try {
-      final request = GraphQLRequest<String>(
-        document: onUpdateBusLocationSubscription,
-        authorizationMode: APIAuthorizationType.apiKey,
-      );
-      final Stream<GraphQLResponse<String>> operation = Amplify.API.subscribe(
-        request,
+      final updateOp = Amplify.API.subscribe(
+        GraphQLRequest<String>(
+          document: onUpdateSub,
+          authorizationMode: APIAuthorizationType.apiKey,
+        ),
         onEstablished: () =>
             safePrint('Student onUpdateBusLocation subscription active'),
       );
 
-      _locationSubscription = operation.listen(
-        (event) {
-          if (event.data != null && !_isDisposed) {
-            try {
-              final Map<String, dynamic> map =
-                  jsonDecode(event.data!) as Map<String, dynamic>;
-              final Map<String, dynamic>? loc =
-                  map['onUpdateBusLocation'] as Map<String, dynamic>?;
-              if (loc != null && loc['busId'] == targetBusId) {
-                _currentBusLocation = BusLocationData.fromJson(loc);
-                _busLocationStreamController.add(_currentBusLocation);
-              }
-            } catch (e) {
-              safePrint('Error decoding bus location subscription event: $e');
-            }
-          }
-        },
-        onError: (err) => safePrint('BusLocation subscription error: $err'),
+      _updateSubscription = updateOp.listen(
+        (event) => _handleSubEvent(event.data, 'onUpdateBusLocation'),
+        onError: (err) => safePrint('BusLocation update sub error: $err'),
+      );
+
+      final createOp = Amplify.API.subscribe(
+        GraphQLRequest<String>(
+          document: onCreateSub,
+          authorizationMode: APIAuthorizationType.apiKey,
+        ),
+      );
+
+      _createSubscription = createOp.listen(
+        (event) => _handleSubEvent(event.data, 'onCreateBusLocation'),
+        onError: (err) => safePrint('BusLocation create sub error: $err'),
       );
     } catch (e) {
       safePrint('Failed to start bus location subscription: $e');
     }
   }
 
+  void _handleSubEvent(String? rawData, String key) {
+    if (rawData == null || _isDisposed) return;
+    try {
+      final Map<String, dynamic> map =
+          jsonDecode(rawData) as Map<String, dynamic>;
+      final Map<String, dynamic>? loc = map[key] as Map<String, dynamic>?;
+      if (loc != null && loc['busId'] == targetBusId) {
+        _currentBusLocation = BusLocationData.fromJson(loc);
+        _busLocationStreamController.add(_currentBusLocation);
+      }
+    } catch (e) {
+      safePrint('Error decoding $key event: $e');
+    }
+  }
+
   /// Server-verified boarding via transit-gateway Lambda.
-  /// Student apps never possess Bus qrSecret; HMAC, expiry, fee status,
-  /// GPS proximity, and duplicate-boarding are enforced server-side.
   Future<BoardingResult> verifyAndBoard(
     String rawQrPayload, {
     bool bypassGpsCheck = false,
@@ -284,11 +344,10 @@ class StudentBoardingService {
         studentLat = position.latitude;
         studentLng = position.longitude;
       } catch (e) {
-        // Strict security: never fall back to bus coordinates on GPS failure
         return BoardingResult(
           isSuccess: false,
           message:
-              'Location Error: Unable to acquire live GPS fix ($e). Enable GPS or desk testing.',
+              'Location Error: Unable to acquire live GPS fix ($e). Enable GPS or indoor testing.',
         );
       }
     }
@@ -348,7 +407,8 @@ class StudentBoardingService {
       if (payload['success'] != true) {
         return BoardingResult(
           isSuccess: false,
-          message: payload['message'] as String? ?? 'Boarding verification failed.',
+          message:
+              payload['message'] as String? ?? 'Boarding verification failed.',
         );
       }
 
@@ -401,7 +461,8 @@ class StudentBoardingService {
       if (payload == null || payload['success'] != true) {
         return ParentWardStatusData(
           success: false,
-          message: payload?['message'] as String? ?? 'Failed to load ward status.',
+          message:
+              payload?['message'] as String? ?? 'Failed to load ward status.',
         );
       }
 
@@ -429,7 +490,9 @@ class StudentBoardingService {
 
   void dispose() {
     _isDisposed = true;
-    _locationSubscription?.cancel();
+    _pollingTimer?.cancel();
+    _updateSubscription?.cancel();
+    _createSubscription?.cancel();
     _busLocationStreamController.close();
   }
 }
