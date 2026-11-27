@@ -1,6 +1,8 @@
 import { useState, useMemo, useRef, useEffect, type FC, type FormEvent } from 'react';
 import type { Schema } from '../../amplify/data/resource';
 import { generateSecurePin } from '../utils/crypto';
+import { isUserFeeValid } from '../utils/routeUtils';
+import { FeeBulkImportModal } from './FeeBulkImportModal';
 import {
   Users,
   UserPlus,
@@ -19,6 +21,7 @@ import {
   Lock,
   Eye,
   EyeOff,
+  FileSpreadsheet,
 } from 'lucide-react';
 
 type UserProfileType = Schema['UserProfile']['type'];
@@ -33,9 +36,12 @@ interface UsersManagerProps {
     pin: string;
     fullName: string;
     role: string;
+    phone?: string;
     assignedBusId?: string;
     parentOfStudentId?: string;
     feePaid?: boolean;
+    feeReceiptId?: string;
+    feeValidUntil?: string | null;
   }) => Promise<void>;
   onUpdateUser: (user: {
     userId: string;
@@ -43,13 +49,28 @@ interface UsersManagerProps {
     pin?: string;
     fullName: string;
     role: string;
+    phone?: string;
     assignedBusId?: string;
     parentOfStudentId?: string;
     feePaid?: boolean;
+    feeReceiptId?: string;
+    feeValidUntil?: string | null;
     unlock?: boolean;
+  }) => Promise<void>;
+  onBulkUpsertFeeUser: (payload: {
+    existingUserId?: string;
+    loginId: string;
+    fullName: string;
+    phone?: string;
+    assignedBusId?: string;
+    feePaid: boolean;
+    feeReceiptId?: string;
+    feeValidUntil?: string | null;
+    pinHash?: string;
   }) => Promise<void>;
   onToggleFeePaid: (userId: string, currentStatus: boolean) => Promise<void>;
   onDeleteUser: (userId: string) => Promise<void>;
+  onBulkDeleteUsers: (userIds: string[]) => Promise<void>;
   onSeedSampleData: () => Promise<void>;
 }
 
@@ -58,12 +79,18 @@ export const UsersManager: FC<UsersManagerProps> = ({
   buses,
   onAddUser,
   onUpdateUser,
+  onBulkUpsertFeeUser,
   onToggleFeePaid,
   onDeleteUser,
+  onBulkDeleteUsers,
   onSeedSampleData,
 }) => {
   const [roleFilter, setRoleFilter] = useState<'all' | 'student' | 'driver' | 'parent'>('all');
+  const [busFilter, setBusFilter] = useState<string>('all');
+  const [feeFilter, setFeeFilter] = useState<'all' | 'valid' | 'unpaid_or_expired'>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [isFeeImportOpen, setIsFeeImportOpen] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<UserProfileType | null>(null);
 
@@ -71,10 +98,13 @@ export const UsersManager: FC<UsersManagerProps> = ({
   const [formRole, setFormRole] = useState<'student' | 'driver' | 'parent'>('student');
   const [formFullName, setFormFullName] = useState('');
   const [formLoginId, setFormLoginId] = useState('');
+  const [formPhone, setFormPhone] = useState('');
   const [formPin, setFormPin] = useState('');
   const [formAssignedBusId, setFormAssignedBusId] = useState('');
   const [formParentOfStudentId, setFormParentOfStudentId] = useState('');
   const [formFeePaid, setFormFeePaid] = useState(true);
+  const [formFeeReceiptId, setFormFeeReceiptId] = useState('');
+  const [formFeeValidUntil, setFormFeeValidUntil] = useState('');
   const [showPin, setShowPin] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -113,10 +143,13 @@ export const UsersManager: FC<UsersManagerProps> = ({
     setEditingUser(null);
     setFormRole(defaultRole);
     setFormFullName('');
-    setFormPin(generateSecurePin());
+    setFormPhone('');
+    setFormPin('');
     setFormAssignedBusId(buses[0]?.busId || 'BUS_01');
     setFormParentOfStudentId('');
     setFormFeePaid(true);
+    setFormFeeReceiptId('');
+    setFormFeeValidUntil('');
     setShowPin(false);
 
     if (defaultRole === 'student') {
@@ -138,10 +171,13 @@ export const UsersManager: FC<UsersManagerProps> = ({
     setFormRole((user.role as 'student' | 'driver' | 'parent') || 'student');
     setFormFullName(user.fullName);
     setFormLoginId(user.loginId);
+    setFormPhone(user.phone || '');
     setFormPin('');
     setFormAssignedBusId(user.assignedBusId || '');
     setFormParentOfStudentId(user.parentOfStudentId || '');
     setFormFeePaid(user.feePaid ?? true);
+    setFormFeeReceiptId(user.feeReceiptId || '');
+    setFormFeeValidUntil(user.feeValidUntil ? user.feeValidUntil.slice(0, 10) : '');
     setShowPin(false);
     setIsModalOpen(true);
   };
@@ -165,12 +201,18 @@ export const UsersManager: FC<UsersManagerProps> = ({
     e.preventDefault();
     const cleanName = formFullName.trim();
     const cleanLoginId = formLoginId.trim();
-    const cleanPin = formPin.trim();
+    const cleanPhone = formPhone.replace(/\D/g, '').trim();
+    let cleanPin = formPin.trim();
 
     if (!cleanName || !cleanLoginId) return;
 
+    // Default to first 6 digits of phone when creating a user with blank PIN
+    if (!editingUser && !cleanPin && cleanPhone.length >= 6) {
+      cleanPin = cleanPhone.slice(0, 6);
+    }
+
     if (!editingUser && !/^\d{4,6}$/.test(cleanPin)) {
-      alert('PIN must be 4 to 6 numeric digits.');
+      alert('Enter a 4–6 digit PIN or a 6+ digit phone number (first 6 digits used as initial PIN).');
       return;
     }
     if (editingUser && cleanPin.length > 0 && !/^\d{4,6}$/.test(cleanPin)) {
@@ -188,6 +230,11 @@ export const UsersManager: FC<UsersManagerProps> = ({
       return;
     }
 
+    const resolvedValidUntil =
+      formRole === 'student' && formFeeValidUntil.trim()
+        ? new Date(`${formFeeValidUntil.trim()}T23:59:59Z`).toISOString()
+        : null;
+
     try {
       setIsSubmitting(true);
       if (editingUser) {
@@ -197,10 +244,13 @@ export const UsersManager: FC<UsersManagerProps> = ({
           pin: cleanPin || undefined,
           fullName: cleanName,
           role: formRole,
+          phone: cleanPhone || undefined,
           assignedBusId: formAssignedBusId || undefined,
           parentOfStudentId:
             formRole === 'parent' ? formParentOfStudentId.trim() || undefined : undefined,
           feePaid: formRole === 'student' ? formFeePaid : true,
+          feeReceiptId: formRole === 'student' ? formFeeReceiptId.trim() || undefined : undefined,
+          feeValidUntil: resolvedValidUntil,
         });
         if (cleanPin) {
           setIssuedCredential({
@@ -217,10 +267,13 @@ export const UsersManager: FC<UsersManagerProps> = ({
           pin: cleanPin,
           fullName: cleanName,
           role: formRole,
+          phone: cleanPhone || undefined,
           assignedBusId: formAssignedBusId || undefined,
           parentOfStudentId:
             formRole === 'parent' ? formParentOfStudentId.trim() || undefined : undefined,
           feePaid: formRole === 'student' ? formFeePaid : true,
+          feeReceiptId: formRole === 'student' ? formFeeReceiptId.trim() || undefined : undefined,
+          feeValidUntil: resolvedValidUntil,
         });
         setIssuedCredential({
           fullName: cleanName,
@@ -307,17 +360,66 @@ export const UsersManager: FC<UsersManagerProps> = ({
     if (roleFilter !== 'all') {
       result = result.filter((u) => u.role === roleFilter);
     }
+    if (busFilter !== 'all') {
+      result = result.filter((u) => (u.assignedBusId || '') === busFilter);
+    }
+    if (feeFilter === 'valid') {
+      result = result.filter((u) => u.role === 'student' && isUserFeeValid(u));
+    } else if (feeFilter === 'unpaid_or_expired') {
+      result = result.filter((u) => u.role === 'student' && !isUserFeeValid(u));
+    }
     const q = searchQuery.toLowerCase().trim();
     if (q) {
       result = result.filter(
         (u) =>
           u.fullName.toLowerCase().includes(q) ||
           u.loginId.toLowerCase().includes(q) ||
+          (u.phone && u.phone.toLowerCase().includes(q)) ||
           (u.assignedBusId && u.assignedBusId.toLowerCase().includes(q))
       );
     }
     return result;
-  }, [users, roleFilter, searchQuery]);
+  }, [users, roleFilter, busFilter, feeFilter, searchQuery]);
+
+  const toggleSelectedUser = (userId: string) => {
+    setSelectedIds((prev) =>
+      prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId],
+    );
+  };
+
+  const allFilteredSelected =
+    filteredUsers.length > 0 &&
+    filteredUsers.every((u) => selectedIds.includes(u.userId));
+
+  const toggleSelectAllFiltered = () => {
+    if (allFilteredSelected) {
+      const filteredSet = new Set(filteredUsers.map((u) => u.userId));
+      setSelectedIds((prev) => prev.filter((id) => !filteredSet.has(id)));
+    } else {
+      const nextSet = new Set(selectedIds);
+      filteredUsers.forEach((u) => nextSet.add(u.userId));
+      setSelectedIds(Array.from(nextSet));
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedIds.length === 0) return;
+    if (
+      !window.confirm(
+        `Delete ${selectedIds.length} selected user records permanently? Unselected records remain untouched.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await onBulkDeleteUsers(selectedIds);
+      showToast(`Deleted ${selectedIds.length} selected user records.`);
+      setSelectedIds([]);
+    } catch (err) {
+      console.error('Bulk delete error:', err);
+      alert('Failed while deleting selected users.');
+    }
+  };
 
   const counts = useMemo(
     () => ({
@@ -405,6 +507,16 @@ export const UsersManager: FC<UsersManagerProps> = ({
           <button
             type="button"
             className="btn-secondary flex items-center gap-2 text-xs"
+            onClick={() => setIsFeeImportOpen(true)}
+            title="Upload .csv or .xlsx to update fees, extend validity dates, and register new passengers"
+          >
+            <FileSpreadsheet size={14} className="text-emerald-400" />
+            <span>Import Fee CSV / Excel</span>
+          </button>
+
+          <button
+            type="button"
+            className="btn-secondary flex items-center gap-2 text-xs"
             onClick={handleSeed}
             disabled={isSeeding}
             title="Seed 1 sample bus, 1 driver, 2 passengers, and 1 parent"
@@ -424,39 +536,79 @@ export const UsersManager: FC<UsersManagerProps> = ({
         </div>
       </div>
 
-      {/* Role filter pills */}
-      <div className="role-filter-row">
-        <button
-          type="button"
-          className={`role-filter-pill ${roleFilter === 'all' ? 'active' : ''}`}
-          onClick={() => setRoleFilter('all')}
-        >
-          All Users <span className="pill-count">{counts.all}</span>
-        </button>
-        <button
-          type="button"
-          className={`role-filter-pill ${roleFilter === 'student' ? 'active' : ''}`}
-          onClick={() => setRoleFilter('student')}
-        >
-          <School size={13} className="text-blue-400" />
-          Passengers <span className="pill-count">{counts.student}</span>
-        </button>
-        <button
-          type="button"
-          className={`role-filter-pill ${roleFilter === 'driver' ? 'active' : ''}`}
-          onClick={() => setRoleFilter('driver')}
-        >
-          <BusIcon size={13} className="text-emerald-400" />
-          Drivers <span className="pill-count">{counts.driver}</span>
-        </button>
-        <button
-          type="button"
-          className={`role-filter-pill ${roleFilter === 'parent' ? 'active' : ''}`}
-          onClick={() => setRoleFilter('parent')}
-        >
-          <Phone size={13} className="text-purple-400" />
-          Parents <span className="pill-count">{counts.parent}</span>
-        </button>
+      {/* Role, Bus & Fee Filters + Bulk Cleanup Bar */}
+      <div className="role-filter-row flex-wrap justify-between">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            className={`role-filter-pill ${roleFilter === 'all' ? 'active' : ''}`}
+            onClick={() => setRoleFilter('all')}
+          >
+            All Users <span className="pill-count">{counts.all}</span>
+          </button>
+          <button
+            type="button"
+            className={`role-filter-pill ${roleFilter === 'student' ? 'active' : ''}`}
+            onClick={() => setRoleFilter('student')}
+          >
+            <School size={13} className="text-blue-400" />
+            Passengers <span className="pill-count">{counts.student}</span>
+          </button>
+          <button
+            type="button"
+            className={`role-filter-pill ${roleFilter === 'driver' ? 'active' : ''}`}
+            onClick={() => setRoleFilter('driver')}
+          >
+            <BusIcon size={13} className="text-emerald-400" />
+            Drivers <span className="pill-count">{counts.driver}</span>
+          </button>
+          <button
+            type="button"
+            className={`role-filter-pill ${roleFilter === 'parent' ? 'active' : ''}`}
+            onClick={() => setRoleFilter('parent')}
+          >
+            <Phone size={13} className="text-purple-400" />
+            Parents <span className="pill-count">{counts.parent}</span>
+          </button>
+
+          <select
+            value={busFilter}
+            onChange={(e) => setBusFilter(e.target.value)}
+            className="text-xs bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-200"
+            title="Filter by Assigned Bus"
+          >
+            <option value="all">All Buses</option>
+            {buses.map((b) => (
+              <option key={b.busId} value={b.busId}>
+                {b.busId}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={feeFilter}
+            onChange={(e) =>
+              setFeeFilter(e.target.value as 'all' | 'valid' | 'unpaid_or_expired')
+            }
+            className="text-xs bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-200"
+            title="Filter by Fee / Validity Status for Cleanup"
+          >
+            <option value="all">All Fee Statuses</option>
+            <option value="valid">Fee Paid &amp; Valid</option>
+            <option value="unpaid_or_expired">Pending / Expired</option>
+          </select>
+        </div>
+
+        {selectedIds.length > 0 && (
+          <button
+            type="button"
+            onClick={handleBulkDelete}
+            className="btn-force-end text-xs py-1.5 px-3"
+          >
+            <Trash2 size={14} />
+            <span>Delete Selected ({selectedIds.length})</span>
+          </button>
+        )}
       </div>
 
       {/* User Directory Table */}
@@ -465,6 +617,14 @@ export const UsersManager: FC<UsersManagerProps> = ({
           <table className="ledger-table users-table">
             <thead>
               <tr>
+                <th style={{ width: '36px' }}>
+                  <input
+                    type="checkbox"
+                    checked={allFilteredSelected}
+                    onChange={toggleSelectAllFiltered}
+                    title="Select all visible rows for bulk cleanup"
+                  />
+                </th>
                 <th>Full Name</th>
                 <th>Role</th>
                 <th>Login ID</th>
@@ -480,9 +640,17 @@ export const UsersManager: FC<UsersManagerProps> = ({
                 const isDriver = user.role === 'driver';
                 const isLocked =
                   !!user.lockedUntil && Date.parse(user.lockedUntil) > nowMs;
+                const feeValid = isUserFeeValid(user);
 
                 return (
                   <tr key={user.userId}>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.includes(user.userId)}
+                        onChange={() => toggleSelectedUser(user.userId)}
+                      />
+                    </td>
                     <td>
                       <div className="flex items-center gap-2">
                         <div
@@ -506,7 +674,9 @@ export const UsersManager: FC<UsersManagerProps> = ({
                               : isDriver
                               ? 'Authorized Fleet Pilot'
                               : isStudent
-                              ? 'Verified Transit Passenger'
+                              ? user.phone
+                                ? `Phone: ${user.phone}`
+                                : 'Verified Transit Passenger'
                               : 'Campus User'}
                           </div>
                         </div>
@@ -570,26 +740,34 @@ export const UsersManager: FC<UsersManagerProps> = ({
 
                     <td>
                       {isStudent ? (
-                        <button
-                          type="button"
-                          className={`fee-status-btn ${
-                            user.feePaid ? 'fee-paid' : 'fee-unpaid'
-                          }`}
-                          onClick={() => onToggleFeePaid(user.userId, user.feePaid ?? true)}
-                          title="Click to toggle fee status in DynamoDB"
-                        >
-                          {user.feePaid ? (
-                            <>
-                              <CheckCircle size={12} />
-                              <span>Paid</span>
-                            </>
-                          ) : (
-                            <>
-                              <AlertCircle size={12} />
-                              <span>Unpaid</span>
-                            </>
+                        <div className="flex flex-col items-start gap-1">
+                          <button
+                            type="button"
+                            className={`fee-status-btn ${
+                              feeValid ? 'fee-paid' : 'fee-unpaid'
+                            }`}
+                            onClick={() => onToggleFeePaid(user.userId, user.feePaid ?? true)}
+                            title="Click to toggle fee status in DynamoDB"
+                          >
+                            {feeValid ? (
+                              <>
+                                <CheckCircle size={12} />
+                                <span>Paid</span>
+                              </>
+                            ) : (
+                              <>
+                                <AlertCircle size={12} />
+                                <span>{user.feePaid === false ? 'Unpaid' : 'Expired'}</span>
+                              </>
+                            )}
+                          </button>
+                          {(user.feeValidUntil || user.feeReceiptId) && (
+                            <span className="text-[10px] text-slate-400 font-mono">
+                              {user.feeValidUntil ? `Till ${user.feeValidUntil.slice(0, 10)}` : ''}
+                              {user.feeReceiptId ? ` • ${user.feeReceiptId}` : ''}
+                            </span>
                           )}
-                        </button>
+                        </div>
                       ) : isParent ? (
                         <span className="text-xs text-purple-300">
                           Child: {user.parentOfStudentId || 'N/A'}
@@ -741,13 +919,24 @@ export const UsersManager: FC<UsersManagerProps> = ({
                 />
               </div>
 
+              {/* Phone Number (First 6 digits used as default initial PIN if PIN blank) */}
+              <div className="form-group">
+                <label>Mobile Phone Number (optional — first 6 digits = default PIN)</label>
+                <input
+                  type="tel"
+                  placeholder="e.g. 9876543210"
+                  value={formPhone}
+                  onChange={(e) => setFormPhone(e.target.value)}
+                />
+              </div>
+
               {/* PIN with CSPRNG Random button and eye toggle */}
               <div className="form-group">
                 <div className="flex items-center justify-between">
                   <label>
                     {editingUser
                       ? 'Reset Access PIN (leave blank to keep current)'
-                      : 'Access PIN (4–6 numeric digits)'}
+                      : 'Access PIN (leave blank to use first 6 digits of Phone)'}
                   </label>
                   <button
                     type="button"
@@ -766,8 +955,11 @@ export const UsersManager: FC<UsersManagerProps> = ({
                     type={showPin ? 'text' : 'password'}
                     inputMode="numeric"
                     maxLength={6}
-                    required={!editingUser}
-                    placeholder={editingUser ? 'Leave blank to keep unchanged' : 'e.g. 4829'}
+                    placeholder={
+                      editingUser
+                        ? 'Leave blank to keep unchanged'
+                        : 'Auto from phone or enter 4–6 digits'
+                    }
                     value={formPin}
                     onChange={(e) => setFormPin(e.target.value.replace(/\D/g, ''))}
                     className="w-full pr-10 font-mono text-center tracking-widest text-base font-bold text-emerald-400"
@@ -827,9 +1019,9 @@ export const UsersManager: FC<UsersManagerProps> = ({
                 </div>
               )}
 
-              {/* Fee Paid Toggle */}
+              {/* Fee Paid Toggle + Validity */}
               {formRole === 'student' && (
-                <div className="form-group">
+                <div className="form-group space-y-2.5">
                   <div className="flex items-center justify-between p-3 rounded-lg bg-slate-900/60 border border-slate-800">
                     <div>
                       <span className="font-semibold text-sm text-slate-100 block">
@@ -838,7 +1030,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
                       <span className="text-xs text-slate-400">
                         {formFeePaid
                           ? 'Valid pass — QR scanning will approve boarding'
-                          : 'Unpaid — Scanner will reject boarding with fee due notice'}
+                          : 'Unpaid — Blocked unless bus-wise grace override is active'}
                       </span>
                     </div>
                     <label className="toggle-switch">
@@ -849,6 +1041,26 @@ export const UsersManager: FC<UsersManagerProps> = ({
                       />
                       <span className="toggle-slider" />
                     </label>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="text-xs text-slate-300">Valid Until Date (optional)</label>
+                      <input
+                        type="date"
+                        value={formFeeValidUntil}
+                        onChange={(e) => setFormFeeValidUntil(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-300">Receipt No (optional)</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. REC-2026-101"
+                        value={formFeeReceiptId}
+                        onChange={(e) => setFormFeeReceiptId(e.target.value)}
+                      />
+                    </div>
                   </div>
                 </div>
               )}
@@ -876,6 +1088,16 @@ export const UsersManager: FC<UsersManagerProps> = ({
             </form>
           </div>
         </div>
+      )}
+
+      {isFeeImportOpen && (
+        <FeeBulkImportModal
+          users={users}
+          buses={buses}
+          onUpsertUser={onBulkUpsertFeeUser}
+          onClose={() => setIsFeeImportOpen(false)}
+          onSuccess={(summary) => showToast(summary)}
+        />
       )}
     </div>
   );

@@ -19,6 +19,9 @@ const schema = a
         busId: a.id().required(),
         routeName: a.string().required(),
         destination: a.string(),
+        stopsJson: a.string(),
+        routePolylineJson: a.string(),
+        allowUnpaidUntil: a.datetime(),
         capacity: a.integer().default(45),
         qrSecret: a.string().required(),
         isActive: a.boolean().default(true),
@@ -34,9 +37,12 @@ const schema = a
         pinHash: a.string().required(),
         fullName: a.string().required(),
         role: a.string().required(),
+        phone: a.string(),
         assignedBusId: a.string(),
         parentOfStudentId: a.string(),
         feePaid: a.boolean().default(true),
+        feeReceiptId: a.string(),
+        feeValidUntil: a.datetime(),
         failedAttempts: a.integer().default(0),
         lockedUntil: a.datetime(),
       })
@@ -51,6 +57,12 @@ const schema = a
         status: a.string().required(),
         destination: a.string(),
         tripDirection: a.string(),
+        distanceKm: a.float().default(0),
+        sosCategory: a.string(),
+        sosTriggerSource: a.string(),
+        sosReporterIdsJson: a.string(),
+        buzzerAlertId: a.string(),
+        buzzerTriggeredAt: a.datetime(),
         startedAt: a.datetime(),
         endedAt: a.datetime(),
       })
@@ -72,6 +84,16 @@ const schema = a
         boardedCount: a.integer().default(0),
         destination: a.string(),
         tripDirection: a.string(),
+        stopsJson: a.string(),
+        routePolylineJson: a.string(),
+        tripStatus: a.string(),
+        sosCategory: a.string(),
+        sosTriggerSource: a.string(),
+        sosReporterCount: a.integer().default(0),
+        buzzerAlertId: a.string(),
+        buzzerTarget: a.string(),
+        buzzerMessage: a.string(),
+        buzzerTriggeredAt: a.datetime(),
       })
       .identifier(['busId'])
       .authorization((allow) => [
@@ -79,7 +101,7 @@ const schema = a
         allow.publicApiKey().to(['read']),
       ]),
 
-    // Boarding ledger containing student PII & GPS; protected from unauthenticated reads/writes
+    // Boarding ledger containing passenger PII & GPS; protected from unauthenticated reads/writes
     AttendanceLog: a
       .model({
         tripId: a.string().required(),
@@ -89,6 +111,8 @@ const schema = a
         scanLat: a.float(),
         scanLng: a.float(),
         scannedAt: a.datetime(),
+        unpaidOverride: a.boolean().default(false),
+        markedByAdmin: a.boolean().default(false),
       })
       .secondaryIndexes((index) => [index('studentId')])
       .authorization((allow) => [allow.group('ADMINS')]),
@@ -116,6 +140,29 @@ const schema = a
         heading: a.float(),
         destination: a.string(),
         tripDirection: a.string(),
+        sosCategory: a.string(),
+      })
+      .returns(a.json())
+      .authorization((allow) => [allow.publicApiKey()])
+      .handler(a.handler.function(transitGateway)),
+
+    passengerSosAction: a
+      .mutation()
+      .arguments({
+        sessionToken: a.string().required(),
+        tripId: a.string(),
+        category: a.string().required(),
+      })
+      .returns(a.json())
+      .authorization((allow) => [allow.publicApiKey()])
+      .handler(a.handler.function(transitGateway)),
+
+    changeMobilePin: a
+      .mutation()
+      .arguments({
+        sessionToken: a.string().required(),
+        currentPin: a.string().required(),
+        newPin: a.string().required(),
       })
       .returns(a.json())
       .authorization((allow) => [allow.publicApiKey()])

@@ -2,6 +2,13 @@ import { useState, useMemo, useRef, useEffect, type FC, type FormEvent } from 'r
 import type { Schema } from '../../amplify/data/resource';
 import { generateSecureQrSecret } from '../utils/crypto';
 import {
+  type RouteStop,
+  parseStopsJson,
+  parsePolylineJson,
+  isBusOverrideActive,
+} from '../utils/routeUtils';
+import { RouteStopEditor } from './RouteStopEditor';
+import {
   Bus as BusIcon,
   PlusCircle,
   Search,
@@ -15,6 +22,8 @@ import {
   EyeOff,
   Copy,
   Check,
+  Route,
+  ShieldCheck,
 } from 'lucide-react';
 
 type BusType = Schema['Bus']['type'];
@@ -25,10 +34,13 @@ interface BusesManagerProps {
   buses: BusType[];
   trips: TripType[];
   busLocations: BusLocationType[];
+  onSelectBusDetail: (busId: string) => void;
   onAddBus: (bus: {
     busId: string;
     routeName: string;
     destination?: string;
+    stopsJson?: string;
+    routePolylineJson?: string;
     capacity: number;
     qrSecret: string;
   }) => Promise<void>;
@@ -36,6 +48,8 @@ interface BusesManagerProps {
     busId: string;
     routeName: string;
     destination?: string;
+    stopsJson?: string;
+    routePolylineJson?: string;
     capacity: number;
   }) => Promise<void>;
   onRotateSecret: (busId: string) => Promise<string>;
@@ -46,6 +60,7 @@ export const BusesManager: FC<BusesManagerProps> = ({
   buses,
   trips,
   busLocations,
+  onSelectBusDetail,
   onAddBus,
   onUpdateBus,
   onRotateSecret,
@@ -61,6 +76,8 @@ export const BusesManager: FC<BusesManagerProps> = ({
   const [formDestination, setFormDestination] = useState('');
   const [formCapacity, setFormCapacity] = useState('45');
   const [formQrSecret, setFormQrSecret] = useState('');
+  const [formStops, setFormStops] = useState<RouteStop[]>([]);
+  const [formPolyline, setFormPolyline] = useState<Array<[number, number]>>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [revealedSecrets, setRevealedSecrets] = useState<Record<string, boolean>>({});
@@ -94,6 +111,8 @@ export const BusesManager: FC<BusesManagerProps> = ({
     setFormDestination('');
     setFormCapacity('45');
     setFormQrSecret(generateRandomSecret(defaultId));
+    setFormStops([]);
+    setFormPolyline([]);
     setIsModalOpen(true);
   };
 
@@ -104,6 +123,8 @@ export const BusesManager: FC<BusesManagerProps> = ({
     setFormDestination(bus.destination ?? '');
     setFormCapacity(String(bus.capacity ?? 45));
     setFormQrSecret(bus.qrSecret);
+    setFormStops(parseStopsJson(bus.stopsJson));
+    setFormPolyline(parsePolylineJson(bus.routePolylineJson));
     setIsModalOpen(true);
   };
 
@@ -118,7 +139,13 @@ export const BusesManager: FC<BusesManagerProps> = ({
       return;
     }
 
-    const cleanDest = formDestination.trim() || undefined;
+    const cleanDest =
+      formDestination.trim() ||
+      (formStops.length > 0 ? formStops[formStops.length - 1].name : undefined);
+    const stopsJson = formStops.length > 0 ? JSON.stringify(formStops) : undefined;
+    const routePolylineJson =
+      formPolyline.length >= 2 ? JSON.stringify(formPolyline) : undefined;
+
     try {
       setIsSubmitting(true);
       if (editingBus) {
@@ -126,6 +153,8 @@ export const BusesManager: FC<BusesManagerProps> = ({
           busId: editingBus.busId,
           routeName: cleanRoute,
           destination: cleanDest,
+          stopsJson,
+          routePolylineJson,
           capacity: Math.min(Math.max(parseInt(formCapacity, 10) || 45, 1), 120),
         });
         showToast(`Bus ${editingBus.busId} updated successfully`);
@@ -134,6 +163,8 @@ export const BusesManager: FC<BusesManagerProps> = ({
           busId: cleanId,
           routeName: cleanRoute,
           destination: cleanDest,
+          stopsJson,
+          routePolylineJson,
           capacity: Math.min(Math.max(parseInt(formCapacity, 10) || 45, 1), 120),
           qrSecret: formQrSecret.trim() || generateRandomSecret(cleanId),
         });
@@ -269,6 +300,8 @@ export const BusesManager: FC<BusesManagerProps> = ({
             const activeTrip = activeTripsMap.get(bus.busId);
             const liveLoc = busLocations.find((l) => l.busId === bus.busId);
             const isRevealed = !!revealedSecrets[bus.busId];
+            const busStops = parseStopsJson(bus.stopsJson);
+            const overrideOn = isBusOverrideActive(bus.allowUnpaidUntil);
 
             return (
               <div
@@ -291,8 +324,13 @@ export const BusesManager: FC<BusesManagerProps> = ({
                         {bus.routeName}
                       </p>
                       <p className="text-[11px] text-emerald-400/90 line-clamp-1 mt-0.5">
-                        Dest: {bus.destination || 'Not assigned'}
+                        Dest: {bus.destination || 'Not assigned'} • {busStops.length} stops
                       </p>
+                      {overrideOn && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-300 mt-0.5">
+                          <ShieldCheck size={11} /> Unpaid Grace Active
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -309,18 +347,18 @@ export const BusesManager: FC<BusesManagerProps> = ({
                   </span>
                 </div>
 
-                {/* Stats */}
+                {/* Stats (Numeric per-bus occupancy) */}
                 <div className="bus-card-stats">
                   <div className="stat-box">
-                    <span className="stat-label">Max Capacity</span>
-                    <span className="stat-val text-slate-200">
-                      {bus.capacity ?? 45} seats
+                    <span className="stat-label">Occupancy</span>
+                    <span className="stat-val text-emerald-400">
+                      {liveLoc?.boardedCount ?? 0} / {bus.capacity ?? 45} seats
                     </span>
                   </div>
                   <div className="stat-box">
-                    <span className="stat-label">Live Boarded</span>
-                    <span className="stat-val text-emerald-400">
-                      {liveLoc?.boardedCount ?? 0} students
+                    <span className="stat-label">Route Stops</span>
+                    <span className="stat-val text-slate-200">
+                      {busStops.length > 0 ? `${busStops.length} pins` : 'Not mapped'}
                     </span>
                   </div>
                   <div className="stat-box">
@@ -379,6 +417,15 @@ export const BusesManager: FC<BusesManagerProps> = ({
                   <button
                     type="button"
                     className="bus-action-btn btn-edit"
+                    onClick={() => onSelectBusDetail(bus.busId)}
+                    title="Inspect Bus Route, Passengers, Unpaid Override & Trip History"
+                  >
+                    <Route size={14} />
+                    <span>Details</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="bus-action-btn btn-edit"
                     onClick={() => handleOpenEditModal(bus)}
                     title="Edit Route or Capacity"
                   >
@@ -389,7 +436,7 @@ export const BusesManager: FC<BusesManagerProps> = ({
                     type="button"
                     className="bus-action-btn btn-rotate"
                     onClick={() => handleRotate(bus.busId)}
-                    title="Generate New QR Secret (Invalidates old student QR codes)"
+                    title="Generate New QR Secret (Invalidates old passenger QR codes)"
                   >
                     <RotateCw size={14} />
                     <span>Rotate Secret</span>
@@ -431,7 +478,7 @@ export const BusesManager: FC<BusesManagerProps> = ({
       {/* Add / Edit Bus Modal */}
       {isModalOpen && (
         <div className="modal-backdrop">
-          <div className="modal-card">
+          <div className="modal-card" style={{ maxWidth: '720px' }}>
             <div className="modal-header">
               <h3 className="modal-title">
                 {editingBus ? `Edit Bus ${editingBus.busId}` : 'Register New Fleet Bus'}
@@ -445,7 +492,7 @@ export const BusesManager: FC<BusesManagerProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="modal-form">
+            <form onSubmit={handleSubmit} className="modal-form max-h-[82vh] overflow-y-auto">
               <div className="form-group">
                 <label>Bus ID (Primary Key)</label>
                 <input
@@ -465,7 +512,7 @@ export const BusesManager: FC<BusesManagerProps> = ({
                 />
                 {!editingBus && (
                   <span className="text-[11px] text-slate-400 mt-1">
-                    Unique identifier used on student passes and driver credentials.
+                    Unique identifier used on passenger passes and driver credentials.
                   </span>
                 )}
               </div>
@@ -481,27 +528,41 @@ export const BusesManager: FC<BusesManagerProps> = ({
                 />
               </div>
 
-              <div className="form-group">
-                <label>Current Destination</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Main Campus Gate / Vijayawada"
-                  value={formDestination}
-                  onChange={(e) => setFormDestination(e.target.value)}
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="form-group">
+                  <label>Default Destination</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Main Campus Gate / Vijayawada"
+                    value={formDestination}
+                    onChange={(e) => setFormDestination(e.target.value)}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label>Seating Capacity (Exact Count)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="120"
+                    required
+                    value={formCapacity}
+                    onChange={(e) => setFormCapacity(e.target.value)}
+                  />
+                </div>
               </div>
 
-              <div className="form-group">
-                <label>Passenger Seating Capacity</label>
-                <input
-                  type="number"
-                  min="1"
-                  max="120"
-                  required
-                  value={formCapacity}
-                  onChange={(e) => setFormCapacity(e.target.value)}
-                />
-              </div>
+              <RouteStopEditor
+                stops={formStops}
+                polyline={formPolyline}
+                onChange={(nextStops, nextLine) => {
+                  setFormStops(nextStops);
+                  setFormPolyline(nextLine);
+                  if (!formDestination.trim() && nextStops.length > 0) {
+                    setFormDestination(nextStops[nextStops.length - 1].name);
+                  }
+                }}
+              />
 
               {!editingBus && (
                 <div className="form-group">
@@ -524,7 +585,7 @@ export const BusesManager: FC<BusesManagerProps> = ({
                     className="font-mono text-xs text-amber-300"
                   />
                   <span className="text-[11px] text-slate-400 mt-1">
-                    Secret key shared with student passes for cryptographic tamper-proofing.
+                    Secret key shared with passenger passes for cryptographic tamper-proofing.
                   </span>
                 </div>
               )}

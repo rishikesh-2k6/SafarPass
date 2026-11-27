@@ -41,6 +41,8 @@ class DriverTelemetryService {
   DateTime? lastTripStartedAt;
   DateTime? lastTripEndedAt;
   String? lastTripDirection;
+  String currentTripStatus = 'idle';
+  String? _lastEmittedBuzzerId;
   int boardedCount = 0;
 
   double currentLat = 16.4632;
@@ -88,11 +90,19 @@ class DriverTelemetryService {
       StreamController<bool>.broadcast();
   final StreamController<String> _destinationStreamController =
       StreamController<String>.broadcast();
+  final StreamController<({String alertId, String target, String message})>
+      _buzzerStreamController = StreamController<
+          ({String alertId, String target, String message})>.broadcast();
+  final StreamController<String> _tripStatusStreamController =
+      StreamController<String>.broadcast();
 
   Stream<String> get qrStream => _qrStreamController.stream;
   Stream<int> get boardedCountStream => _boardedCountStreamController.stream;
   Stream<bool> get tripStateStream => _tripStateStreamController.stream;
   Stream<String> get destinationStream => _destinationStreamController.stream;
+  Stream<({String alertId, String target, String message})> get buzzerStream =>
+      _buzzerStreamController.stream;
+  Stream<String> get tripStatusStream => _tripStatusStreamController.stream;
 
   void Function(int count)? onBoardedCountChanged;
   void Function(String qrPayload)? onQrPayloadChanged;
@@ -166,6 +176,7 @@ class DriverTelemetryService {
     double? heading,
     String? destination,
     String? tripDirection,
+    String? sosCategory,
   }) async {
     const String mutation = r'''
       mutation DriverTripAction(
@@ -178,6 +189,7 @@ class DriverTelemetryService {
         $heading: Float
         $destination: String
         $tripDirection: String
+        $sosCategory: String
       ) {
         driverTripAction(
           sessionToken: $sessionToken
@@ -189,6 +201,7 @@ class DriverTelemetryService {
           heading: $heading
           destination: $destination
           tripDirection: $tripDirection
+          sosCategory: $sosCategory
         )
       }
     ''';
@@ -205,6 +218,7 @@ class DriverTelemetryService {
         'heading': ?heading,
         'destination': ?destination,
         'tripDirection': ?tripDirection,
+        'sosCategory': ?sosCategory,
       },
       authorizationMode: APIAuthorizationType.apiKey,
     );
@@ -477,8 +491,39 @@ class DriverTelemetryService {
         }
         onBoardedCountChanged?.call(boardedCount);
       }
+
+      _processAlertMetadata(
+        tripStatus: result['tripStatus'] as String?,
+        buzzerAlertId: result['buzzerAlertId'] as String?,
+        buzzerTarget: result['buzzerTarget'] as String?,
+        buzzerMessage: result['buzzerMessage'] as String?,
+      );
     } catch (e) {
       safePrint('Error executing telemetry location update: $e');
+    }
+  }
+
+  void _processAlertMetadata({
+    String? tripStatus,
+    String? buzzerAlertId,
+    String? buzzerTarget,
+    String? buzzerMessage,
+  }) {
+    if (_isDisposed) return;
+    if (tripStatus != null && tripStatus != currentTripStatus) {
+      currentTripStatus = tripStatus;
+      _tripStatusStreamController.add(tripStatus);
+    }
+    if (buzzerAlertId != null &&
+        buzzerAlertId.isNotEmpty &&
+        buzzerAlertId != _lastEmittedBuzzerId &&
+        (buzzerTarget == 'driver' || buzzerTarget == 'all')) {
+      _lastEmittedBuzzerId = buzzerAlertId;
+      _buzzerStreamController.add((
+        alertId: buzzerAlertId,
+        target: buzzerTarget ?? 'all',
+        message: buzzerMessage ?? 'Emergency Alert Triggered!',
+      ));
     }
   }
 
@@ -512,6 +557,13 @@ class DriverTelemetryService {
           heading
           boardedCount
           destination
+          tripStatus
+          sosCategory
+          sosTriggerSource
+          sosReporterCount
+          buzzerAlertId
+          buzzerTarget
+          buzzerMessage
         }
       }
     ''';
@@ -550,6 +602,12 @@ class DriverTelemetryService {
                     _destinationStreamController.add(currentDestination);
                   }
                 }
+                _processAlertMetadata(
+                  tripStatus: loc['tripStatus'] as String?,
+                  buzzerAlertId: loc['buzzerAlertId'] as String?,
+                  buzzerTarget: loc['buzzerTarget'] as String?,
+                  buzzerMessage: loc['buzzerMessage'] as String?,
+                );
               }
             } catch (e) {
               safePrint('Error decoding subscription payload: $e');
@@ -563,11 +621,12 @@ class DriverTelemetryService {
     }
   }
 
-  Future<void> triggerSos() async {
+  Future<void> triggerSos({String category = 'medical'}) async {
     if (activeTripId == null) return;
     final Map<String, dynamic>? res = await _invokeDriverTripAction(
       action: 'sos',
       tripId: activeTripId,
+      sosCategory: category,
     );
     if (res != null && res['success'] != true) {
       throw res['message'] as String? ?? 'Failed to trigger SOS.';
@@ -633,5 +692,7 @@ class DriverTelemetryService {
     _boardedCountStreamController.close();
     _tripStateStreamController.close();
     _destinationStreamController.close();
+    _buzzerStreamController.close();
+    _tripStatusStreamController.close();
   }
 }

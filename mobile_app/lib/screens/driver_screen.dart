@@ -6,6 +6,9 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../models/user_session.dart';
 import '../services/driver_telemetry_service.dart';
+import '../services/emergency_buzzer_service.dart';
+import '../utils/route_helpers.dart';
+import '../widgets/change_pin_dialog.dart';
 
 class DriverScreen extends StatefulWidget {
   final UserSession session;
@@ -28,6 +31,7 @@ class _DriverScreenState extends State<DriverScreen> {
       DateTime.now().hour < 12 ? 'to_campus' : 'to_home';
   String _currentQrPayload = '';
   String _currentDestination = '';
+  String? _activeEmergencyBanner;
   int _boardedCount = 0;
   int _previousBoardedCount = 0;
 
@@ -35,6 +39,8 @@ class _DriverScreenState extends State<DriverScreen> {
   StreamSubscription<int>? _boardedSub;
   StreamSubscription<bool>? _tripStateSub;
   StreamSubscription<String>? _destSub;
+  StreamSubscription<({String alertId, String target, String message})>?
+      _buzzerSub;
 
   @override
   void initState() {
@@ -89,6 +95,15 @@ class _DriverScreenState extends State<DriverScreen> {
         setState(() {
           _currentDestination = dest;
           _destinationController.text = dest;
+        });
+      }
+    });
+
+    _buzzerSub = _telemetryService.buzzerStream.listen((alert) {
+      EmergencyBuzzerService.instance.triggerForAlert(alert.alertId);
+      if (mounted) {
+        setState(() {
+          _activeEmergencyBanner = alert.message;
         });
       }
     });
@@ -369,47 +384,25 @@ class _DriverScreenState extends State<DriverScreen> {
   }
 
   Future<void> _handleTriggerSos() async {
-    final bool? confirm = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Row(
-          children: [
-            Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 28),
-            SizedBox(width: 8),
-            Text('Confirm Emergency SOS',
-                style: TextStyle(color: Color(0xFFD97706))),
-          ],
-        ),
-        content: const Text(
-          'This will flag the trip as an emergency SOS in transit telemetry and notify dispatchers immediately.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFD97706),
-              foregroundColor: Colors.white,
-            ),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('TRIGGER SOS'),
-          ),
-        ],
-      ),
+    final String? category = await showSosCategoryPickerDialog(
+      context,
+      title: 'Trigger Emergency SOS',
+      subtitle:
+          'Select the emergency category. Alerts & buzzer will notify Admin Dispatch and boarded Passengers.',
     );
 
-    if (confirm != true) return;
+    if (category == null) return;
 
     try {
-      await _telemetryService.triggerSos();
+      await _telemetryService.triggerSos(category: category);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            backgroundColor: Color(0xFFB45309),
-            duration: Duration(seconds: 4),
-            content: Text('EMERGENCY SOS SENT! Dispatchers notified.'),
+          SnackBar(
+            backgroundColor: const Color(0xFFB45309),
+            duration: const Duration(seconds: 4),
+            content: Text(
+              'EMERGENCY SOS ($category) SENT! Passengers & Admin notified.',
+            ),
           ),
         );
       }
@@ -428,6 +421,8 @@ class _DriverScreenState extends State<DriverScreen> {
     _boardedSub?.cancel();
     _tripStateSub?.cancel();
     _destSub?.cancel();
+    _buzzerSub?.cancel();
+    EmergencyBuzzerService.instance.stopBuzzer();
     _destinationController.dispose();
     _telemetryService.dispose();
     _flutterTts.stop();
@@ -492,6 +487,15 @@ class _DriverScreenState extends State<DriverScreen> {
         ),
         actions: [
           IconButton(
+            tooltip: 'Change PIN',
+            icon: const Icon(Icons.lock_reset_rounded,
+                color: Color(0xFF64748B), size: 21),
+            onPressed: () => showChangePinDialog(
+              context,
+              sessionToken: widget.session.sessionToken,
+            ),
+          ),
+          IconButton(
             tooltip: 'Logout',
             icon: const Icon(Icons.logout_rounded,
                 color: Color(0xFF64748B), size: 20),
@@ -504,9 +508,58 @@ class _DriverScreenState extends State<DriverScreen> {
             ? const Center(
                 child: CircularProgressIndicator(color: Color(0xFF10B981)),
               )
-            : _isTripActive
-                ? _buildActiveTripState()
-                : _buildIdleState(),
+            : Column(
+                children: [
+                  if (_activeEmergencyBanner != null)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      color: const Color(0xFFDC2626),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.notifications_active_rounded,
+                              color: Colors.white, size: 22),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              _activeEmergencyBanner!,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          TextButton(
+                            style: TextButton.styleFrom(
+                              backgroundColor: Colors.white,
+                              foregroundColor: const Color(0xFF991B1B),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 4),
+                            ),
+                            onPressed: () {
+                              EmergencyBuzzerService.instance.stopBuzzer();
+                              setState(() => _activeEmergencyBanner = null);
+                            },
+                            child: const Text(
+                              'Silence',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  Expanded(
+                    child: _isTripActive
+                        ? _buildActiveTripState()
+                        : _buildIdleState(),
+                  ),
+                ],
+              ),
       ),
     );
   }
@@ -724,6 +777,15 @@ class _DriverScreenState extends State<DriverScreen> {
                     style: TextStyle(
                       fontSize: 12,
                       color: Colors.grey.shade600,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Tip: Set Android Battery Optimization to Unrestricted for VahanSync so live GPS and emergency buzzers never pause.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Color(0xFF94A3B8),
                     ),
                   ),
                 ],

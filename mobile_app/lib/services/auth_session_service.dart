@@ -107,4 +107,57 @@ class AuthSessionService {
       );
     }
   }
+
+  static Future<({bool success, String message})> changePin({
+    required String sessionToken,
+    required String currentPin,
+    required String newPin,
+  }) async {
+    const String changePinMutation = r'''
+      mutation ChangeMobilePin(
+        $sessionToken: String!
+        $currentPin: String!
+        $newPin: String!
+      ) {
+        changeMobilePin(
+          sessionToken: $sessionToken
+          currentPin: $currentPin
+          newPin: $newPin
+        )
+      }
+    ''';
+
+    try {
+      final request = GraphQLRequest<String>(
+        document: changePinMutation,
+        variables: {
+          'sessionToken': sessionToken,
+          'currentPin': currentPin.trim(),
+          'newPin': newPin.trim(),
+        },
+        authorizationMode: APIAuthorizationType.apiKey,
+      );
+      final response = await Amplify.API.mutate(request: request).response;
+      if (response.errors.isNotEmpty) {
+        return (success: false, message: response.errors.first.message);
+      }
+      if (response.data == null) {
+        return (success: false, message: 'No response from server.');
+      }
+      final Map<String, dynamic>? outer =
+          jsonDecode(response.data!) as Map<String, dynamic>?;
+      final Map<String, dynamic>? payload =
+          decodeAwsJsonPayload(outer?['changeMobilePin']);
+      return (
+        success: payload?['success'] == true,
+        message: payload?['message'] as String? ?? 'Could not change PIN.',
+      );
+    } catch (e) {
+      safePrint('Change PIN error: $e');
+      return (
+        success: false,
+        message: 'Network error while updating PIN. Please try again.',
+      );
+    }
+  }
 }

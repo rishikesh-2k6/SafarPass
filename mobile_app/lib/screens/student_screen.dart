@@ -5,7 +5,10 @@ import 'package:latlong2/latlong.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/user_session.dart';
+import '../services/emergency_buzzer_service.dart';
 import '../services/student_boarding_service.dart';
+import '../utils/route_helpers.dart';
+import '../widgets/change_pin_dialog.dart';
 
 class StudentScreen extends StatefulWidget {
   final UserSession session;
@@ -29,6 +32,9 @@ class _StudentScreenState extends State<StudentScreen> {
   bool _isSatellite = false;
   bool _isMapReady = false;
   bool _followBus = true;
+  bool _isSendingSos = false;
+  String? _activeBuzzerBanner;
+  String? _dismissedBuzzerId;
   BoardingResult? _boardingResult;
 
   String get _studentId => widget.session.loginId;
@@ -42,6 +48,18 @@ class _StudentScreenState extends State<StudentScreen> {
     _boardingService = StudentBoardingService(session: widget.session);
     _busLocation = _boardingService.currentBusLocation;
     _busLocationSub = _boardingService.busLocationStream.listen((loc) {
+      if (loc.buzzerAlertId != null &&
+          loc.buzzerAlertId!.isNotEmpty &&
+          loc.buzzerAlertId != _dismissedBuzzerId &&
+          (loc.buzzerTarget == 'passengers' || loc.buzzerTarget == 'all')) {
+        EmergencyBuzzerService.instance.triggerForAlert(loc.buzzerAlertId);
+        if (mounted) {
+          setState(() {
+            _activeBuzzerBanner =
+                loc.buzzerMessage ?? 'EMERGENCY ALERT ON BUS ${loc.busId}';
+          });
+        }
+      }
       if (mounted) {
         setState(() {
           _busLocation = loc;
@@ -54,6 +72,37 @@ class _StudentScreenState extends State<StudentScreen> {
         }
       }
     });
+  }
+
+  bool get _canTriggerPassengerSos =>
+      (_boardingResult?.isSuccess == true) &&
+      (_busLocation.tripId.isNotEmpty) &&
+      (_busLocation.tripStatus != 'completed');
+
+  Future<void> _handlePassengerSos() async {
+    if (!_canTriggerPassengerSos || _isSendingSos) return;
+    final String? category = await showSosCategoryPickerDialog(
+      context,
+      title: 'Passenger Emergency SOS',
+      subtitle:
+          'Select the emergency type. If more than 50% of boarded passengers press SOS, the Driver buzzer and Admin Dispatch alert trigger automatically.',
+    );
+    if (category == null || !mounted) return;
+
+    setState(() => _isSendingSos = true);
+    final res = await _boardingService.sendPassengerSos(category: category);
+    if (!mounted) return;
+    setState(() => _isSendingSos = false);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: res.success
+            ? (res.escalated ? const Color(0xFFDC2626) : const Color(0xFFD97706))
+            : const Color(0xFFEF4444),
+        duration: const Duration(seconds: 4),
+        content: Text(res.message),
+      ),
+    );
   }
 
   Future<void> _locateBus() async {
@@ -126,6 +175,7 @@ class _StudentScreenState extends State<StudentScreen> {
   @override
   void dispose() {
     _busLocationSub?.cancel();
+    EmergencyBuzzerService.instance.stopBuzzer();
     _boardingService.dispose();
     _scannerController.dispose();
     _mapController.dispose();
@@ -137,6 +187,13 @@ class _StudentScreenState extends State<StudentScreen> {
     final String activeDest = _busLocation.destination.isNotEmpty
         ? _busLocation.destination
         : (widget.session.destination ?? '');
+    final List<BusStopPoint> routeStops = parseBusStops(
+      _busLocation.stopsJson ?? widget.session.stopsJson,
+    );
+    final List<LatLng> routePolyline = parseBusPolyline(
+      _busLocation.routePolylineJson ?? widget.session.routePolylineJson,
+      routeStops,
+    );
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
@@ -194,6 +251,18 @@ class _StudentScreenState extends State<StudentScreen> {
         ),
         actions: [
           IconButton(
+            tooltip: 'Change PIN',
+            icon: const Icon(
+              Icons.lock_reset_rounded,
+              color: Color(0xFF64748B),
+              size: 21,
+            ),
+            onPressed: () => showChangePinDialog(
+              context,
+              sessionToken: widget.session.sessionToken,
+            ),
+          ),
+          IconButton(
             tooltip: 'Logout',
             icon: const Icon(
               Icons.logout_rounded,
@@ -207,29 +276,90 @@ class _StudentScreenState extends State<StudentScreen> {
       body: SafeArea(
         child: Column(
           children: [
+            if (_activeBuzzerBanner != null)
+              Container(
+                width: double.infinity,
+                padding:
+                    const EdgeInsets.symmetric(vertical: 8, horizontal: 14),
+                color: const Color(0xFFDC2626),
+                child: Row(
+                  children: [
+                    const Icon(Icons.notifications_active_rounded,
+                        color: Colors.white, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _activeBuzzerBanner!,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: const Color(0xFF991B1B),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 4),
+                      ),
+                      onPressed: () {
+                        EmergencyBuzzerService.instance.stopBuzzer();
+                        setState(() {
+                          _dismissedBuzzerId = _busLocation.buzzerAlertId;
+                          _activeBuzzerBanner = null;
+                        });
+                      },
+                      child: const Text(
+                        'Silence',
+                        style: TextStyle(
+                            fontSize: 11, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             if (!_feePaid)
               Container(
                 width: double.infinity,
                 padding:
                     const EdgeInsets.symmetric(vertical: 6, horizontal: 16),
-                decoration: const BoxDecoration(
-                  color: Color(0xFFFEF3C7),
+                decoration: BoxDecoration(
+                  color: widget.session.busOverrideActive
+                      ? const Color(0xFFECFDF5)
+                      : const Color(0xFFFEF3C7),
                   border: Border(
-                    bottom: BorderSide(color: Color(0xFFFDE68A)),
+                    bottom: BorderSide(
+                      color: widget.session.busOverrideActive
+                          ? const Color(0xFFA7F3D0)
+                          : const Color(0xFFFDE68A),
+                    ),
                   ),
                 ),
-                child: const Row(
+                child: Row(
                   children: [
-                    Icon(Icons.warning_amber_rounded,
-                        size: 16, color: Color(0xFFB45309)),
-                    SizedBox(width: 8),
+                    Icon(
+                      widget.session.busOverrideActive
+                          ? Icons.verified_rounded
+                          : Icons.warning_amber_rounded,
+                      size: 16,
+                      color: widget.session.busOverrideActive
+                          ? const Color(0xFF059669)
+                          : const Color(0xFFB45309),
+                    ),
+                    const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'Transport fee pending. Please clear dues with the accounts office.',
+                        widget.session.busOverrideActive
+                            ? 'Fee pending — Admin temporary grace boarding approved for $_assignedBusId.'
+                            : 'Transport fee pending/expired. Clear dues with accounts (map tracking stays open).',
                         style: TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w600,
-                          color: Color(0xFF92400E),
+                          color: widget.session.busOverrideActive
+                              ? const Color(0xFF065F46)
+                              : const Color(0xFF92400E),
                         ),
                       ),
                     ),
@@ -291,8 +421,52 @@ class _StudentScreenState extends State<StudentScreen> {
                                       : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                                   userAgentPackageName: 'com.vahansync.app',
                                 ),
+                                if (routePolyline.length >= 2)
+                                  PolylineLayer(
+                                    polylines: [
+                                      Polyline(
+                                        points: routePolyline,
+                                        strokeWidth: 4.0,
+                                        color: const Color(0xFF10B981)
+                                            .withValues(alpha: 0.8),
+                                      ),
+                                    ],
+                                  ),
                                 MarkerLayer(
                                   markers: [
+                                    for (int i = 0; i < routeStops.length; i++)
+                                      Marker(
+                                        point: LatLng(
+                                          routeStops[i].lat,
+                                          routeStops[i].lng,
+                                        ),
+                                        width: 24,
+                                        height: 24,
+                                        child: Tooltip(
+                                          message:
+                                              '#${i + 1}: ${routeStops[i].name}',
+                                          child: Container(
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFF2563EB),
+                                              shape: BoxShape.circle,
+                                              border: Border.all(
+                                                color: Colors.white,
+                                                width: 2,
+                                              ),
+                                            ),
+                                            child: Center(
+                                              child: Text(
+                                                '${i + 1}',
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 10,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
                                     Marker(
                                       point: LatLng(
                                           _busLocation.lat, _busLocation.lng),
@@ -557,6 +731,74 @@ class _StudentScreenState extends State<StudentScreen> {
                           ),
                           const SizedBox(height: 14),
                           _buildScanQrTab(),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+
+                    // Passenger Emergency SOS Card (gated: Active trip + Boarded)
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: _canTriggerPassengerSos
+                              ? const Color(0xFFFCA5A5)
+                              : const Color(0xFFE2E8F0),
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          SizedBox(
+                            height: 46,
+                            child: OutlinedButton.icon(
+                              style: OutlinedButton.styleFrom(
+                                side: BorderSide(
+                                  color: _canTriggerPassengerSos
+                                      ? const Color(0xFFDC2626)
+                                      : const Color(0xFFCBD5E1),
+                                  width: 1.5,
+                                ),
+                                backgroundColor: _canTriggerPassengerSos
+                                    ? const Color(0xFFFEF2F2)
+                                    : const Color(0xFFF8FAFC),
+                                foregroundColor: _canTriggerPassengerSos
+                                    ? const Color(0xFFB91C1C)
+                                    : const Color(0xFF94A3B8),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                              icon: const Icon(Icons.warning_amber_rounded,
+                                  size: 20),
+                              label: Text(
+                                _isSendingSos
+                                    ? 'Sending SOS...'
+                                    : 'PASSENGER SOS ALERT',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 13,
+                                ),
+                              ),
+                              onPressed: _canTriggerPassengerSos &&
+                                      !_isSendingSos
+                                  ? _handlePassengerSos
+                                  : null,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            _canTriggerPassengerSos
+                                ? 'Bus active & boarded (${_busLocation.sosReporterCount}/${_busLocation.boardedCount} SOS votes). >50% alerts Driver buzzer & Admin.'
+                                : 'Enabled after scanning Bus QR on an active trip (>50% passenger votes alert Driver & Admin).',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF64748B),
+                            ),
+                          ),
                         ],
                       ),
                     ),

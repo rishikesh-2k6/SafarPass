@@ -7,8 +7,14 @@ class UserSession {
   final String assignedBusId;
   final String? parentOfStudentId;
   final bool feePaid;
+  final String? feeValidUntil;
+  final String? feeReceiptId;
+  final String? phone;
+  final bool busOverrideActive;
   final String routeName;
   final String? destination;
+  final String? stopsJson;
+  final String? routePolylineJson;
   final int busCapacity;
   final String? qrSecret;
 
@@ -27,8 +33,14 @@ class UserSession {
     required this.assignedBusId,
     this.parentOfStudentId,
     required this.feePaid,
+    this.feeValidUntil,
+    this.feeReceiptId,
+    this.phone,
+    this.busOverrideActive = false,
     required this.routeName,
     this.destination,
+    this.stopsJson,
+    this.routePolylineJson,
     required this.busCapacity,
     this.qrSecret,
     this.wardLoginId,
@@ -54,8 +66,14 @@ class UserSession {
       assignedBusId: assignedBus,
       parentOfStudentId: user['parentOfStudentId'] as String?,
       feePaid: user['feePaid'] as bool? ?? true,
+      feeValidUntil: user['feeValidUntil'] as String?,
+      feeReceiptId: user['feeReceiptId'] as String?,
+      phone: user['phone'] as String?,
+      busOverrideActive: user['busOverrideActive'] as bool? ?? false,
       routeName: (bus?['routeName'] as String?) ?? 'Campus Transit Route',
       destination: bus?['destination'] as String?,
+      stopsJson: bus?['stopsJson'] as String?,
+      routePolylineJson: bus?['routePolylineJson'] as String?,
       busCapacity: (bus?['capacity'] as num?)?.toInt() ?? 45,
       qrSecret: bus?['qrSecret'] as String?,
       wardLoginId: ward?['loginId'] as String? ?? user['parentOfStudentId'] as String?,

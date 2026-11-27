@@ -84,6 +84,14 @@ function safeEqualHex(a: string, b: string): boolean {
   return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
 }
 
+function hashPinNode(pin: string): string {
+  const salt = randomBytes(16).toString('hex');
+  const computedHex = createHash('sha256')
+    .update(`${salt}:${pin.trim()}`)
+    .digest('hex');
+  return `v1$${salt}$${computedHex}`;
+}
+
 function verifyPinHash(pin: string, storedHash: string): boolean {
   if (!storedHash.startsWith('v1$')) {
     return false;
@@ -164,6 +172,79 @@ function normalizeTripDirection(raw: unknown): 'to_campus' | 'to_home' {
   return clean === 'to_home' ? 'to_home' : 'to_campus';
 }
 
+function normalizeSosCategory(raw: unknown): 'medical' | 'accident' | 'mechanical' {
+  const clean = String(raw ?? '').trim().toLowerCase();
+  if (clean === 'accident' || clean === 'mechanical') return clean;
+  return 'medical';
+}
+
+function sosCategoryLabel(cat: string): string {
+  if (cat === 'accident') return 'Accident Alert';
+  if (cat === 'mechanical') return 'Mechanical Breakdown';
+  return 'Medical Emergency';
+}
+
+function isFeeCurrentlyValid(
+  profile: { feePaid?: boolean | null; feeValidUntil?: string | null },
+  bus?: { allowUnpaidUntil?: string | null } | null,
+): { isPermanentValid: boolean; isBusOverrideActive: boolean; canBoard: boolean } {
+  const hasFeePaid = profile.feePaid !== false;
+  const validUntilMs = profile.feeValidUntil ? Date.parse(profile.feeValidUntil) : Number.NaN;
+  const notExpired =
+    !profile.feeValidUntil || (!Number.isNaN(validUntilMs) && validUntilMs >= Date.now());
+  const isPermanentValid = hasFeePaid && notExpired;
+
+  const overrideMs = bus?.allowUnpaidUntil ? Date.parse(bus.allowUnpaidUntil) : Number.NaN;
+  const isBusOverrideActive = !Number.isNaN(overrideMs) && overrideMs > Date.now();
+
+  return {
+    isPermanentValid,
+    isBusOverrideActive,
+    canBoard: isPermanentValid || isBusOverrideActive,
+  };
+}
+
+function buildDirectionalRoute(
+  bus: { stopsJson?: string | null; routePolylineJson?: string | null } | null | undefined,
+  direction: 'to_campus' | 'to_home',
+): { stopsJson: string | null; routePolylineJson: string | null; terminalName: string | null } {
+  let stopsJson: string | null = bus?.stopsJson ?? null;
+  let routePolylineJson: string | null = bus?.routePolylineJson ?? null;
+  let terminalName: string | null = null;
+
+  if (stopsJson) {
+    try {
+      const parsed = JSON.parse(stopsJson) as Array<{
+        order?: number;
+        name?: string;
+        lat?: number;
+        lng?: number;
+      }>;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const ordered = direction === 'to_home' ? [...parsed].reverse() : [...parsed];
+        const reindexed = ordered.map((s, idx) => ({ ...s, order: idx + 1 }));
+        stopsJson = JSON.stringify(reindexed);
+        terminalName = reindexed[reindexed.length - 1]?.name ?? null;
+      }
+    } catch {
+      // keep raw stopsJson
+    }
+  }
+
+  if (routePolylineJson && direction === 'to_home') {
+    try {
+      const pts = JSON.parse(routePolylineJson) as unknown[];
+      if (Array.isArray(pts) && pts.length > 0) {
+        routePolylineJson = JSON.stringify([...pts].reverse());
+      }
+    } catch {
+      // keep raw routePolylineJson
+    }
+  }
+
+  return { stopsJson, routePolylineJson, terminalName };
+}
+
 function isValidCoordinate(lat: unknown, lng: unknown): boolean {
   return (
     typeof lat === 'number' &&
@@ -242,8 +323,10 @@ async function handleMobileLogin(
     fullName: string;
     assignedBusId: string;
     feePaid: boolean;
+    feeValidUntil: string | null;
   } | null = null;
 
+  let wardUserRecord: { feePaid?: boolean | null; feeValidUntil?: string | null } | null = null;
   if (role === 'parent' && user.parentOfStudentId) {
     const { data: wardMatches } = await client.models.UserProfile.listUserProfileByLoginId({
       loginId: user.parentOfStudentId,
@@ -251,16 +334,23 @@ async function handleMobileLogin(
     const ward = wardMatches?.[0];
     if (ward) {
       effectiveBusId = ward.assignedBusId || effectiveBusId;
+      wardUserRecord = ward;
       wardProfile = {
         loginId: ward.loginId,
         fullName: ward.fullName,
         assignedBusId: effectiveBusId,
         feePaid: ward.feePaid ?? true,
+        feeValidUntil: ward.feeValidUntil ?? null,
       };
     }
   }
 
   const { data: bus } = await client.models.Bus.get({ busId: effectiveBusId });
+  const userFee = isFeeCurrentlyValid(user, bus);
+  if (wardProfile && wardUserRecord) {
+    wardProfile.feePaid = isFeeCurrentlyValid(wardUserRecord, bus).isPermanentValid;
+  }
+
   const signingKey = await getSigningKey(client);
   const nowSec = Math.floor(Date.now() / 1000);
 
@@ -286,15 +376,22 @@ async function handleMobileLogin(
       loginId: user.loginId,
       fullName: user.fullName,
       role: user.role,
+      phone: user.phone ?? null,
       assignedBusId: effectiveBusId,
       parentOfStudentId: user.parentOfStudentId ?? null,
-      feePaid: user.feePaid ?? true,
+      feePaid: userFee.isPermanentValid,
+      feeValidUntil: user.feeValidUntil ?? null,
+      feeReceiptId: user.feeReceiptId ?? null,
+      busOverrideActive: userFee.isBusOverrideActive,
     },
     bus: bus
       ? {
           busId: bus.busId,
           routeName: bus.routeName,
           destination: bus.destination ?? null,
+          stopsJson: bus.stopsJson ?? null,
+          routePolylineJson: bus.routePolylineJson ?? null,
+          allowUnpaidUntil: bus.allowUnpaidUntil ?? null,
           capacity: bus.capacity ?? 45,
           // Only drivers need the bus HMAC key locally to mint rotating QR codes
           qrSecret: role === 'driver' ? bus.qrSecret : null,
@@ -340,7 +437,9 @@ async function handleDriverTripAction(
     const rawDest = typeof args.destination === 'string' ? args.destination.trim() : '';
     const tripDirection = normalizeTripDirection(args.tripDirection);
     const { data: busRecord } = await client.models.Bus.get({ busId });
-    const resolvedDestination = rawDest || busRecord?.destination || null;
+    const directionalRoute = buildDirectionalRoute(busRecord, tripDirection);
+    const resolvedDestination =
+      rawDest || busRecord?.destination || directionalRoute.terminalName || null;
 
     if (rawDest && busRecord) {
       await client.models.Bus.update({ busId, destination: rawDest });
@@ -352,6 +451,7 @@ async function handleDriverTripAction(
       status: 'active',
       destination: resolvedDestination,
       tripDirection,
+      distanceKm: 0,
       startedAt: nowIso,
     });
     if (errors?.length || !createdTrip) {
@@ -365,31 +465,33 @@ async function handleDriverTripAction(
       ? (args.lng as number)
       : DEFAULT_CAMPUS_LNG;
 
+    const locPayload = {
+      busId,
+      tripId: createdTrip.id,
+      lat,
+      lng,
+      speed: 0,
+      heading: 0,
+      boardedCount: 0,
+      destination: resolvedDestination,
+      tripDirection,
+      stopsJson: directionalRoute.stopsJson,
+      routePolylineJson: directionalRoute.routePolylineJson,
+      tripStatus: 'active',
+      sosCategory: null,
+      sosTriggerSource: null,
+      sosReporterCount: 0,
+      buzzerAlertId: null,
+      buzzerTarget: null,
+      buzzerMessage: null,
+      buzzerTriggeredAt: null,
+    };
+
     const { data: existingLoc } = await client.models.BusLocation.get({ busId });
     if (existingLoc) {
-      await client.models.BusLocation.update({
-        busId,
-        tripId: createdTrip.id,
-        lat,
-        lng,
-        speed: 0,
-        heading: 0,
-        boardedCount: 0,
-        destination: resolvedDestination,
-        tripDirection,
-      });
+      await client.models.BusLocation.update(locPayload);
     } else {
-      await client.models.BusLocation.create({
-        busId,
-        tripId: createdTrip.id,
-        lat,
-        lng,
-        speed: 0,
-        heading: 0,
-        boardedCount: 0,
-        destination: resolvedDestination,
-        tripDirection,
-      });
+      await client.models.BusLocation.create(locPayload);
     }
 
     return {
@@ -398,6 +500,8 @@ async function handleDriverTripAction(
       status: 'active',
       destination: resolvedDestination,
       tripDirection,
+      stopsJson: directionalRoute.stopsJson,
+      routePolylineJson: directionalRoute.routePolylineJson,
       startedAt: nowIso,
       boardedCount: 0,
     };
@@ -424,6 +528,8 @@ async function handleDriverTripAction(
     if (!isValidCoordinate(args.lat, args.lng)) {
       return { success: false, message: 'Invalid GPS coordinates.' };
     }
+    const newLat = args.lat as number;
+    const newLng = args.lng as number;
     const rawSpeed = typeof args.speed === 'number' && Number.isFinite(args.speed) ? args.speed : 0;
     const speed = Math.min(Math.max(rawSpeed, 0), 150);
     const heading =
@@ -431,27 +537,42 @@ async function handleDriverTripAction(
         ? ((args.heading % 360) + 360) % 360
         : 0;
 
+    const { data: priorLoc } = await client.models.BusLocation.get({ busId });
+    const stepMeters =
+      priorLoc && priorLoc.tripId === tripId
+        ? haversineMeters(priorLoc.lat, priorLoc.lng, newLat, newLng)
+        : 0;
+
     let { data: updatedLoc, errors: locErrs } = await client.models.BusLocation.update({
       busId,
       tripId,
-      lat: args.lat as number,
-      lng: args.lng as number,
+      lat: newLat,
+      lng: newLng,
       speed,
       heading,
+      tripStatus: trip.status,
     });
 
     if (locErrs?.length || !updatedLoc) {
       const created = await client.models.BusLocation.create({
         busId,
         tripId,
-        lat: args.lat as number,
-        lng: args.lng as number,
+        lat: newLat,
+        lng: newLng,
         speed,
         heading,
-        boardedCount: 0,
+        boardedCount: priorLoc?.boardedCount ?? 0,
         destination: trip.destination ?? null,
+        tripDirection: trip.tripDirection ?? null,
+        tripStatus: trip.status,
       });
       updatedLoc = created.data;
+    }
+
+    if (stepMeters >= 15 && stepMeters <= 5000) {
+      const prevKm = trip.distanceKm ?? 0;
+      const nextKm = Math.round((prevKm + stepMeters / 1000) * 1000) / 1000;
+      await client.models.Trip.update({ id: tripId, distanceKm: nextKm });
     }
 
     return {
@@ -459,6 +580,10 @@ async function handleDriverTripAction(
       tripStatus: trip.status,
       destination: updatedLoc?.destination ?? trip.destination ?? null,
       boardedCount: updatedLoc?.boardedCount ?? 0,
+      buzzerAlertId: updatedLoc?.buzzerAlertId ?? null,
+      buzzerTarget: updatedLoc?.buzzerTarget ?? null,
+      buzzerMessage: updatedLoc?.buzzerMessage ?? null,
+      buzzerTriggeredAt: updatedLoc?.buzzerTriggeredAt ?? null,
     };
   }
 
@@ -487,8 +612,33 @@ async function handleDriverTripAction(
     if (trip.status === 'completed') {
       return { success: false, message: 'Cannot trigger SOS on a completed trip.' };
     }
-    await client.models.Trip.update({ id: tripId, status: 'sos' });
-    return { success: true, tripStatus: 'sos' };
+    const sosCategory = normalizeSosCategory(args.sosCategory);
+    const buzzerAlertId = `buz_${randomBytes(6).toString('hex')}`;
+    const nowIso = new Date().toISOString();
+    const msg = `Driver triggered ${sosCategoryLabel(sosCategory)} on ${busId}.`;
+
+    await client.models.Trip.update({
+      id: tripId,
+      status: 'sos',
+      sosCategory,
+      sosTriggerSource: 'driver',
+      buzzerAlertId,
+      buzzerTriggeredAt: nowIso,
+    });
+    const { data: existingLoc } = await client.models.BusLocation.get({ busId });
+    if (existingLoc) {
+      await client.models.BusLocation.update({
+        busId,
+        tripStatus: 'sos',
+        sosCategory,
+        sosTriggerSource: 'driver',
+        buzzerAlertId,
+        buzzerTarget: 'passengers',
+        buzzerMessage: msg,
+        buzzerTriggeredAt: nowIso,
+      });
+    }
+    return { success: true, tripStatus: 'sos', sosCategory, buzzerAlertId };
   }
 
   if (action === 'end') {
@@ -503,6 +653,7 @@ async function handleDriverTripAction(
       await client.models.BusLocation.update({
         busId,
         speed: 0,
+        tripStatus: 'completed',
       });
     }
     return {
@@ -530,13 +681,6 @@ async function handleVerifyStudentBoarding(
   if (!student) {
     return { success: false, message: 'Student profile not found.' };
   }
-  if (student.feePaid === false) {
-    return {
-      success: false,
-      message: 'Boarding Denied: Transit fee pending. Please clear dues with accounts.',
-    };
-  }
-
   const qrPayload = String(args.qrPayload ?? '').trim();
   const parts = qrPayload.split('|');
   if (parts.length !== 4) {
@@ -557,6 +701,15 @@ async function handleVerifyStudentBoarding(
   const { data: bus } = await client.models.Bus.get({ busId: qrBusId });
   if (!bus) {
     return { success: false, message: 'Bus not registered in fleet.' };
+  }
+
+  const feeCheck = isFeeCurrentlyValid(student, bus);
+  if (!feeCheck.canBoard) {
+    return {
+      success: false,
+      message:
+        'Boarding Denied: Transit fee pending or expired. Clear dues or request Admin grace approval.',
+    };
   }
 
   const rawData = `${qrBusId}|${qrTripId}|${qrTimestampStr}`;
@@ -639,6 +792,8 @@ async function handleVerifyStudentBoarding(
     scanLat: scanLat ?? DEFAULT_CAMPUS_LAT,
     scanLng: scanLng ?? DEFAULT_CAMPUS_LNG,
     scannedAt: boardedAt,
+    unpaidOverride: !feeCheck.isPermanentValid && feeCheck.isBusOverrideActive,
+    markedByAdmin: false,
   });
 
   if (busLoc) {
@@ -683,12 +838,15 @@ async function handleGetParentWardStatus(
   }
 
   const assignedBusId = ward.assignedBusId || 'BUS_01';
-  const [{ data: logs }, { data: busTrips }] = await Promise.all([
+  const [{ data: logs }, { data: busTrips }, { data: busRecord }] = await Promise.all([
     client.models.AttendanceLog.listAttendanceLogByStudentId({
       studentId: ward.loginId,
     }),
     client.models.Trip.listTripByBusId({ busId: assignedBusId }),
+    client.models.Bus.get({ busId: assignedBusId }),
   ]);
+
+  const wardFee = isFeeCurrentlyValid(ward, busRecord);
 
   const activeTrip = (busTrips ?? []).find(
     (t) => t.status === 'active' || t.status === 'sos',
@@ -755,7 +913,7 @@ async function handleGetParentWardStatus(
     wardName: ward.fullName,
     wardLoginId: ward.loginId,
     assignedBusId,
-    feePaid: ward.feePaid ?? true,
+    feePaid: wardFee.isPermanentValid,
     boarded: Boolean(relevantLog),
     boardedAt: relevantLog?.scannedAt ?? null,
     boardedBusId: relevantLog?.busId ?? null,
@@ -764,6 +922,178 @@ async function handleGetParentWardStatus(
     activeDriverId: activeTrip?.driverId ?? null,
     campusTrip: buildLegSummary(campusTripRecord, 'to_campus'),
     homeTrip: buildLegSummary(homeTripRecord, 'to_home'),
+  };
+}
+
+async function handlePassengerSosAction(
+  client: ReturnType<typeof generateClient<Schema>>,
+  args: Record<string, unknown>,
+) {
+  const signingKey = await getSigningKey(client);
+  const session = verifySessionToken(args.sessionToken as string | undefined, signingKey);
+  if (!session || session.role !== 'student') {
+    return { success: false, message: 'Unauthorized passenger session.' };
+  }
+
+  const category = normalizeSosCategory(args.category);
+  const busId = session.busId;
+  const { data: busTrips } = await client.models.Trip.listTripByBusId({ busId });
+  const requestedTripId = String(args.tripId ?? '').trim();
+  const activeTrip =
+    (requestedTripId
+      ? (busTrips ?? []).find((t) => t.id === requestedTripId)
+      : undefined) ??
+    (busTrips ?? []).find((t) => t.status === 'active' || t.status === 'sos');
+
+  if (!activeTrip || activeTrip.status === 'completed') {
+    return {
+      success: false,
+      message: 'Passenger SOS is only available during an active bus trip.',
+    };
+  }
+
+  const { data: logs } = await client.models.AttendanceLog.listAttendanceLogByStudentId({
+    studentId: session.loginId,
+  });
+  const isBoardedOnTrip = (logs ?? []).some((l) => l.tripId === activeTrip.id);
+  if (!isBoardedOnTrip) {
+    return {
+      success: false,
+      message: 'Scan Bus QR upon boarding first to confirm you are on this bus.',
+    };
+  }
+
+  const { data: profile } = await client.models.UserProfile.get({ userId: session.sub });
+  let reporters: Array<{
+    userId: string;
+    loginId: string;
+    fullName: string;
+    category: string;
+    triggeredAt: string;
+  }> = [];
+
+  if (activeTrip.sosReporterIdsJson) {
+    try {
+      const parsed = JSON.parse(activeTrip.sosReporterIdsJson);
+      if (Array.isArray(parsed)) reporters = parsed;
+    } catch {
+      reporters = [];
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const existingIdx = reporters.findIndex((r) => r.userId === session.sub);
+  const reporterEntry = {
+    userId: session.sub,
+    loginId: session.loginId,
+    fullName: profile?.fullName ?? session.loginId,
+    category,
+    triggeredAt: nowIso,
+  };
+  if (existingIdx >= 0) {
+    reporters[existingIdx] = reporterEntry;
+  } else {
+    reporters.push(reporterEntry);
+  }
+
+  const { data: busLoc } = await client.models.BusLocation.get({ busId });
+  const effectiveBoarded = Math.max(busLoc?.boardedCount ?? 0, reporters.length, 1);
+  const majorityThreshold = Math.floor(effectiveBoarded / 2) + 1;
+  const majorityReached = reporters.length >= majorityThreshold;
+
+  const updatedSosJson = JSON.stringify(reporters);
+  if (majorityReached) {
+    const buzzerAlertId = `buz_${randomBytes(6).toString('hex')}`;
+    const msg = `${reporters.length}/${effectiveBoarded} passengers reported ${sosCategoryLabel(category)} on ${busId}.`;
+    await client.models.Trip.update({
+      id: activeTrip.id,
+      status: 'sos',
+      sosCategory: category,
+      sosTriggerSource: 'passengers_majority',
+      sosReporterIdsJson: updatedSosJson,
+      buzzerAlertId,
+      buzzerTriggeredAt: nowIso,
+    });
+    if (busLoc) {
+      await client.models.BusLocation.update({
+        busId,
+        tripStatus: 'sos',
+        sosCategory: category,
+        sosTriggerSource: 'passengers_majority',
+        sosReporterCount: reporters.length,
+        buzzerAlertId,
+        buzzerTarget: 'driver',
+        buzzerMessage: msg,
+        buzzerTriggeredAt: nowIso,
+      });
+    }
+    return {
+      success: true,
+      escalated: true,
+      reporterCount: reporters.length,
+      boardedCount: effectiveBoarded,
+      threshold: majorityThreshold,
+      message: `Majority SOS triggered (${reporters.length}/${effectiveBoarded}). Driver buzzer & Admin alert sent!`,
+    };
+  }
+
+  await client.models.Trip.update({
+    id: activeTrip.id,
+    sosReporterIdsJson: updatedSosJson,
+  });
+  if (busLoc) {
+    await client.models.BusLocation.update({
+      busId,
+      sosReporterCount: reporters.length,
+    });
+  }
+  return {
+    success: true,
+    escalated: false,
+    reporterCount: reporters.length,
+    boardedCount: effectiveBoarded,
+    threshold: majorityThreshold,
+    message: `SOS vote recorded (${reporters.length}/${effectiveBoarded}). Driver & Admin alert escalates at ${majorityThreshold}+.`,
+  };
+}
+
+async function handleChangeMobilePin(
+  client: ReturnType<typeof generateClient<Schema>>,
+  args: Record<string, unknown>,
+) {
+  const signingKey = await getSigningKey(client);
+  const session = verifySessionToken(args.sessionToken as string | undefined, signingKey);
+  if (!session) {
+    return { success: false, message: 'Unauthorized session. Please sign in again.' };
+  }
+
+  const currentPin = String(args.currentPin ?? '').trim();
+  const newPin = String(args.newPin ?? '').trim();
+  if (!/^\d{4,6}$/.test(newPin)) {
+    return { success: false, message: 'New PIN must be 4 to 6 numeric digits.' };
+  }
+  if (currentPin === newPin) {
+    return { success: false, message: 'New PIN must be different from current PIN.' };
+  }
+
+  const { data: user } = await client.models.UserProfile.get({ userId: session.sub });
+  if (!user) {
+    return { success: false, message: 'User profile not found.' };
+  }
+  if (!verifyPinHash(currentPin, user.pinHash)) {
+    return { success: false, message: 'Current PIN is incorrect.' };
+  }
+
+  await client.models.UserProfile.update({
+    userId: user.userId,
+    pinHash: hashPinNode(newPin),
+    failedAttempts: 0,
+    lockedUntil: null,
+  });
+
+  return {
+    success: true,
+    message: 'Security PIN updated successfully.',
   };
 }
 
@@ -781,6 +1111,10 @@ export const handler = async (event: AppSyncEvent) => {
       return JSON.stringify(await handleVerifyStudentBoarding(client, args));
     case 'getParentWardStatus':
       return JSON.stringify(await handleGetParentWardStatus(client, args));
+    case 'passengerSosAction':
+      return JSON.stringify(await handlePassengerSosAction(client, args));
+    case 'changeMobilePin':
+      return JSON.stringify(await handleChangeMobilePin(client, args));
     default:
       return JSON.stringify({ success: false, message: `Unknown operation: ${fieldName}` });
   }

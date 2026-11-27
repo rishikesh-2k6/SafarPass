@@ -16,6 +16,16 @@ class BusLocationData {
   final double heading;
   final int boardedCount;
   final String destination;
+  final String? tripDirection;
+  final String? stopsJson;
+  final String? routePolylineJson;
+  final String? tripStatus;
+  final String? sosCategory;
+  final String? sosTriggerSource;
+  final int sosReporterCount;
+  final String? buzzerAlertId;
+  final String? buzzerTarget;
+  final String? buzzerMessage;
   final DateTime updatedAt;
   final bool hasServerFix;
 
@@ -28,6 +38,16 @@ class BusLocationData {
     required this.heading,
     required this.boardedCount,
     this.destination = '',
+    this.tripDirection,
+    this.stopsJson,
+    this.routePolylineJson,
+    this.tripStatus,
+    this.sosCategory,
+    this.sosTriggerSource,
+    this.sosReporterCount = 0,
+    this.buzzerAlertId,
+    this.buzzerTarget,
+    this.buzzerMessage,
     required this.updatedAt,
     this.hasServerFix = false,
   });
@@ -35,6 +55,8 @@ class BusLocationData {
   factory BusLocationData.initial({
     String busId = 'BUS_01',
     String destination = '',
+    String? stopsJson,
+    String? routePolylineJson,
   }) {
     return BusLocationData(
       busId: busId,
@@ -45,6 +67,8 @@ class BusLocationData {
       heading: 0.0,
       boardedCount: 0,
       destination: destination,
+      stopsJson: stopsJson,
+      routePolylineJson: routePolylineJson,
       updatedAt: DateTime.now(),
       hasServerFix: false,
     );
@@ -61,6 +85,16 @@ class BusLocationData {
       heading: (json['heading'] as num?)?.toDouble() ?? 0.0,
       boardedCount: (json['boardedCount'] as num?)?.toInt() ?? 0,
       destination: (json['destination'] as String?) ?? '',
+      tripDirection: json['tripDirection'] as String?,
+      stopsJson: json['stopsJson'] as String?,
+      routePolylineJson: json['routePolylineJson'] as String?,
+      tripStatus: json['tripStatus'] as String?,
+      sosCategory: json['sosCategory'] as String?,
+      sosTriggerSource: json['sosTriggerSource'] as String?,
+      sosReporterCount: (json['sosReporterCount'] as num?)?.toInt() ?? 0,
+      buzzerAlertId: json['buzzerAlertId'] as String?,
+      buzzerTarget: json['buzzerTarget'] as String?,
+      buzzerMessage: json['buzzerMessage'] as String?,
       updatedAt: updatedAtStr != null
           ? (DateTime.tryParse(updatedAtStr)?.toLocal() ?? DateTime.now())
           : DateTime.now(),
@@ -190,6 +224,8 @@ class StudentBoardingService {
     _currentBusLocation = BusLocationData.initial(
       busId: targetBusId,
       destination: session.destination ?? '',
+      stopsJson: session.stopsJson,
+      routePolylineJson: session.routePolylineJson,
     );
     initLiveLocation();
   }
@@ -242,6 +278,16 @@ class StudentBoardingService {
           heading
           boardedCount
           destination
+          tripDirection
+          stopsJson
+          routePolylineJson
+          tripStatus
+          sosCategory
+          sosTriggerSource
+          sosReporterCount
+          buzzerAlertId
+          buzzerTarget
+          buzzerMessage
           updatedAt
         }
       }
@@ -285,6 +331,16 @@ class StudentBoardingService {
           heading
           boardedCount
           destination
+          tripDirection
+          stopsJson
+          routePolylineJson
+          tripStatus
+          sosCategory
+          sosTriggerSource
+          sosReporterCount
+          buzzerAlertId
+          buzzerTarget
+          buzzerMessage
           updatedAt
         }
       }
@@ -301,6 +357,16 @@ class StudentBoardingService {
           heading
           boardedCount
           destination
+          tripDirection
+          stopsJson
+          routePolylineJson
+          tripStatus
+          sosCategory
+          sosTriggerSource
+          sosReporterCount
+          buzzerAlertId
+          buzzerTarget
+          buzzerMessage
           updatedAt
         }
       }
@@ -544,6 +610,64 @@ class StudentBoardingService {
       return const ParentWardStatusData(
         success: false,
         message: 'Network error loading ward status.',
+      );
+    }
+  }
+
+  Future<({bool success, bool escalated, String message})> sendPassengerSos({
+    required String category,
+  }) async {
+    const String sosMutation = r'''
+      mutation PassengerSosAction(
+        $sessionToken: String!
+        $tripId: String
+        $category: String!
+      ) {
+        passengerSosAction(
+          sessionToken: $sessionToken
+          tripId: $tripId
+          category: $category
+        )
+      }
+    ''';
+
+    try {
+      final String activeTripId = _currentBusLocation.tripId;
+      final request = GraphQLRequest<String>(
+        document: sosMutation,
+        variables: {
+          'sessionToken': session.sessionToken,
+          if (activeTripId.isNotEmpty) 'tripId': activeTripId,
+          'category': category,
+        },
+        authorizationMode: APIAuthorizationType.apiKey,
+      );
+      final response = await Amplify.API.mutate(request: request).response;
+      if (response.errors.isNotEmpty || response.data == null) {
+        return (
+          success: false,
+          escalated: false,
+          message: response.errors.isNotEmpty
+              ? response.errors.first.message
+              : 'Failed to submit SOS report.',
+        );
+      }
+      final Map<String, dynamic>? outer =
+          jsonDecode(response.data!) as Map<String, dynamic>?;
+      final Map<String, dynamic>? payload =
+          decodeAwsJsonPayload(outer?['passengerSosAction']);
+      return (
+        success: payload?['success'] == true,
+        escalated: payload?['escalated'] == true,
+        message:
+            payload?['message'] as String? ?? 'SOS response received from server.',
+      );
+    } catch (e) {
+      safePrint('Error sending passenger SOS: $e');
+      return (
+        success: false,
+        escalated: false,
+        message: 'Network error sending SOS report.',
       );
     }
   }

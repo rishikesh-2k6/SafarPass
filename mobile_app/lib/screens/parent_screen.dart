@@ -5,6 +5,8 @@ import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/user_session.dart';
 import '../services/student_boarding_service.dart';
+import '../utils/route_helpers.dart';
+import '../widgets/change_pin_dialog.dart';
 
 class ParentScreen extends StatefulWidget {
   final UserSession session;
@@ -171,6 +173,18 @@ class _ParentScreenState extends State<ParentScreen> {
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Change PIN',
+            icon: const Icon(
+              Icons.lock_reset_rounded,
+              color: Color(0xFF64748B),
+              size: 21,
+            ),
+            onPressed: () => showChangePinDialog(
+              context,
+              sessionToken: widget.session.sessionToken,
+            ),
+          ),
           IconButton(
             tooltip: 'Refresh status',
             icon: const Icon(
@@ -535,6 +549,14 @@ class _ParentScreenState extends State<ParentScreen> {
   }
 
   Widget _buildExpandedMapCard() {
+    final List<BusStopPoint> routeStops = parseBusStops(
+      _busLocation.stopsJson ?? widget.session.stopsJson,
+    );
+    final List<LatLng> routePolyline = parseBusPolyline(
+      _busLocation.routePolylineJson ?? widget.session.routePolylineJson,
+      routeStops,
+    );
+
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
@@ -579,8 +601,47 @@ class _ParentScreenState extends State<ParentScreen> {
                       : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                   userAgentPackageName: 'com.vahansync.app',
                 ),
+                if (routePolyline.length >= 2)
+                  PolylineLayer(
+                    polylines: [
+                      Polyline(
+                        points: routePolyline,
+                        strokeWidth: 4.0,
+                        color: const Color(0xFF10B981).withValues(alpha: 0.8),
+                      ),
+                    ],
+                  ),
                 MarkerLayer(
                   markers: [
+                    for (int i = 0; i < routeStops.length; i++)
+                      Marker(
+                        point: LatLng(
+                          routeStops[i].lat,
+                          routeStops[i].lng,
+                        ),
+                        width: 24,
+                        height: 24,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF2563EB),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: Colors.white,
+                              width: 2,
+                            ),
+                          ),
+                          child: Center(
+                            child: Text(
+                              '${i + 1}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                     Marker(
                       point: LatLng(_busLocation.lat, _busLocation.lng),
                       width: 50,

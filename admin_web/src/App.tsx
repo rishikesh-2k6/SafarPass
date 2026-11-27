@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, type FC } from 'react';
 import { generateClient } from 'aws-amplify/data';
 import type { Schema } from '../amplify/data/resource';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import {
@@ -9,19 +9,25 @@ import {
   Users,
   AlertTriangle,
   ShieldCheck,
-  Download,
-  Search,
-  RefreshCw,
   Radio,
   CheckCircle,
   Navigation,
   Sparkles,
   LogOut,
+  ShieldAlert,
 } from 'lucide-react';
 import { AdminAuthGate } from './components/AdminAuthGate';
 import { ActiveTripsPanel } from './components/ActiveTripsPanel';
 import { BusesManager } from './components/BusesManager';
+import { BusDetailView } from './components/BusDetailView';
 import { UsersManager } from './components/UsersManager';
+import { OperationsCalendarPanel } from './components/OperationsCalendarPanel';
+import { SosConsoleView } from './components/SosConsoleView';
+import {
+  parseStopsJson,
+  parsePolylineJson,
+  fallbackStraightPolyline,
+} from './utils/routeUtils';
 import {
   hashPin,
   generateSecureId,
@@ -52,7 +58,9 @@ interface FleetPortalProps {
 }
 
 const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
-  const [activeTab, setActiveTab] = useState<'operations' | 'buses' | 'users'>('operations');
+  const [activeTab, setActiveTab] = useState<'operations' | 'buses' | 'users' | 'sos'>('operations');
+  const [selectedDetailBusId, setSelectedDetailBusId] = useState<string | null>(null);
+  const [selectedMapBusFilter, setSelectedMapBusFilter] = useState<string>('all');
 
   // Real-time DynamoDB entities
   const [buses, setBuses] = useState<BusType[]>([]);
@@ -146,7 +154,7 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
     );
   }, [trips, resolvedSosIds]);
 
-  const handleResolveSos = async (tripId: string) => {
+  const handleResolveSos = async (tripId: string, busId?: string) => {
     try {
       const { errors } = await client.models.Trip.update({
         id: tripId,
@@ -155,11 +163,71 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
       if (errors?.length) {
         throw new Error(errors.map((e) => e.message).join(', '));
       }
+      if (busId) {
+        const existingLoc = busLocations.find((l) => l.busId === busId);
+        if (existingLoc) {
+          await client.models.BusLocation.update({
+            busId,
+            tripStatus: 'active',
+            sosCategory: null,
+            sosTriggerSource: null,
+          });
+        }
+      }
       setResolvedSosIds((prev) => [...prev, tripId]);
       showToast('SOS Alert marked as resolved');
     } catch (err) {
       console.error('Could not update trip in DynamoDB:', err);
       alert('Failed to resolve SOS alert in DynamoDB. Please retry.');
+    }
+  };
+
+  const handleTriggerEmergencyBuzzer = async (
+    busId: string,
+    tripId: string | undefined,
+    message: string,
+  ) => {
+    const buzzerAlertId = generateSecureId('buz');
+    const nowIso = new Date().toISOString();
+    try {
+      const existingLoc = busLocations.find((l) => l.busId === busId);
+      if (existingLoc) {
+        const { errors } = await client.models.BusLocation.update({
+          busId,
+          buzzerAlertId,
+          buzzerTarget: 'all',
+          buzzerMessage: message,
+          buzzerTriggeredAt: nowIso,
+        });
+        if (errors?.length) throw new Error(errors[0].message);
+      } else {
+        const { errors } = await client.models.BusLocation.create({
+          busId,
+          tripId: tripId || 'DISPATCH_ALERT',
+          lat: 16.4632,
+          lng: 80.5064,
+          speed: 0,
+          heading: 0,
+          boardedCount: 0,
+          tripStatus: 'active',
+          buzzerAlertId,
+          buzzerTarget: 'all',
+          buzzerMessage: message,
+          buzzerTriggeredAt: nowIso,
+        });
+        if (errors?.length) throw new Error(errors[0].message);
+      }
+      if (tripId) {
+        await client.models.Trip.update({
+          id: tripId,
+          buzzerAlertId,
+          buzzerTriggeredAt: nowIso,
+        });
+      }
+      showToast(`Emergency buzzer triggered for ${busId} (Driver & Passengers).`);
+    } catch (err) {
+      console.error('Failed to trigger emergency buzzer:', err);
+      alert('Could not broadcast emergency buzzer.');
     }
   };
 
@@ -218,6 +286,8 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
     busId: string;
     routeName: string;
     destination?: string;
+    stopsJson?: string;
+    routePolylineJson?: string;
     capacity: number;
     qrSecret: string;
   }) => {
@@ -225,6 +295,8 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
       busId: busData.busId,
       routeName: busData.routeName,
       destination: busData.destination,
+      stopsJson: busData.stopsJson,
+      routePolylineJson: busData.routePolylineJson,
       capacity: busData.capacity,
       qrSecret: busData.qrSecret,
       isActive: true,
@@ -236,15 +308,62 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
     busId: string;
     routeName: string;
     destination?: string;
+    stopsJson?: string;
+    routePolylineJson?: string;
     capacity: number;
   }) => {
     const { errors } = await client.models.Bus.update({
       busId: busData.busId,
       routeName: busData.routeName,
       destination: busData.destination ?? null,
+      stopsJson: busData.stopsJson ?? null,
+      routePolylineJson: busData.routePolylineJson ?? null,
       capacity: busData.capacity,
     });
     if (errors?.length) throw new Error(errors[0].message);
+  };
+
+  const handleSetAllowUnpaidUntil = async (
+    busId: string,
+    allowUnpaidUntil: string | null,
+  ) => {
+    const { errors } = await client.models.Bus.update({
+      busId,
+      allowUnpaidUntil,
+    });
+    if (errors?.length) throw new Error(errors[0].message);
+    showToast(
+      allowUnpaidUntil
+        ? `Unpaid boarding grace enabled for ${busId}.`
+        : `Strict fee verification restored for ${busId}.`,
+    );
+  };
+
+  const handleManualBoardPassenger = async (
+    busId: string,
+    tripId: string,
+    passenger: UserProfileType,
+  ) => {
+    const loc = busLocations.find((l) => l.busId === busId);
+    const { errors } = await client.models.AttendanceLog.create({
+      tripId,
+      busId,
+      studentId: passenger.loginId,
+      studentName: passenger.fullName,
+      scanLat: loc?.lat ?? 16.4632,
+      scanLng: loc?.lng ?? 80.5064,
+      scannedAt: new Date().toISOString(),
+      unpaidOverride: passenger.feePaid === false,
+      markedByAdmin: true,
+    });
+    if (errors?.length) throw new Error(errors[0].message);
+    if (loc) {
+      await client.models.BusLocation.update({
+        busId,
+        boardedCount: (loc.boardedCount ?? 0) + 1,
+      });
+    }
+    showToast(`Marked ${passenger.fullName} boarded on ${busId}.`);
   };
 
   const handleRotateSecret = async (busId: string): Promise<string> => {
@@ -268,9 +387,12 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
     pin: string;
     fullName: string;
     role: string;
+    phone?: string;
     assignedBusId?: string;
     parentOfStudentId?: string;
     feePaid?: boolean;
+    feeReceiptId?: string;
+    feeValidUntil?: string | null;
   }) => {
     const pinHash = await hashPin(userData.pin);
     const userId = generateSecureId('usr');
@@ -280,9 +402,12 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
       pinHash,
       fullName: userData.fullName,
       role: userData.role,
+      phone: userData.phone,
       assignedBusId: userData.assignedBusId,
       parentOfStudentId: userData.parentOfStudentId,
       feePaid: userData.feePaid ?? true,
+      feeReceiptId: userData.feeReceiptId,
+      feeValidUntil: userData.feeValidUntil ?? null,
       failedAttempts: 0,
       lockedUntil: null,
     });
@@ -295,9 +420,12 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
     pin?: string;
     fullName: string;
     role: string;
+    phone?: string;
     assignedBusId?: string;
     parentOfStudentId?: string;
     feePaid?: boolean;
+    feeReceiptId?: string;
+    feeValidUntil?: string | null;
     unlock?: boolean;
   }) => {
     const patch: {
@@ -306,9 +434,12 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
       pinHash?: string;
       fullName: string;
       role: string;
+      phone?: string | null;
       assignedBusId?: string | null;
       parentOfStudentId?: string | null;
       feePaid: boolean;
+      feeReceiptId?: string | null;
+      feeValidUntil?: string | null;
       failedAttempts?: number;
       lockedUntil?: string | null;
     } = {
@@ -316,9 +447,12 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
       loginId: userData.loginId,
       fullName: userData.fullName,
       role: userData.role,
+      phone: userData.phone ?? null,
       assignedBusId: userData.assignedBusId ?? null,
       parentOfStudentId: userData.parentOfStudentId ?? null,
       feePaid: userData.feePaid ?? true,
+      feeReceiptId: userData.feeReceiptId ?? null,
+      feeValidUntil: userData.feeValidUntil ?? null,
     };
 
     if (userData.pin) {
@@ -333,6 +467,54 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
 
     const { errors } = await client.models.UserProfile.update(patch);
     if (errors?.length) throw new Error(errors[0].message);
+  };
+
+  const handleBulkUpsertFeeUser = async (payload: {
+    existingUserId?: string;
+    loginId: string;
+    fullName: string;
+    phone?: string;
+    assignedBusId?: string;
+    feePaid: boolean;
+    feeReceiptId?: string;
+    feeValidUntil?: string | null;
+    pinHash?: string;
+  }) => {
+    if (payload.existingUserId) {
+      const { errors } = await client.models.UserProfile.update({
+        userId: payload.existingUserId,
+        fullName: payload.fullName,
+        phone: payload.phone ?? null,
+        assignedBusId: payload.assignedBusId ?? null,
+        feePaid: payload.feePaid,
+        feeReceiptId: payload.feeReceiptId ?? null,
+        feeValidUntil: payload.feeValidUntil ?? null,
+      });
+      if (errors?.length) throw new Error(errors[0].message);
+    } else if (payload.pinHash) {
+      const { errors } = await client.models.UserProfile.create({
+        userId: generateSecureId('usr'),
+        loginId: payload.loginId,
+        pinHash: payload.pinHash,
+        fullName: payload.fullName,
+        role: 'student',
+        phone: payload.phone ?? null,
+        assignedBusId: payload.assignedBusId ?? 'BUS_01',
+        feePaid: payload.feePaid,
+        feeReceiptId: payload.feeReceiptId ?? null,
+        feeValidUntil: payload.feeValidUntil ?? null,
+        failedAttempts: 0,
+        lockedUntil: null,
+      });
+      if (errors?.length) throw new Error(errors[0].message);
+    }
+  };
+
+  const handleBulkDeleteUsers = async (userIds: string[]) => {
+    for (const userId of userIds) {
+      const { errors } = await client.models.UserProfile.delete({ userId });
+      if (errors?.length) throw new Error(errors[0].message);
+    }
   };
 
   const handleToggleFeePaid = async (userId: string, currentStatus: boolean) => {
@@ -441,18 +623,29 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
 
   const activeSosCount = activeSosTrips.length;
 
-  const fleetOccupancyPct = useMemo(() => {
-    const totalCap = buses.reduce((acc, b) => acc + (b.capacity || 45), 0) || 45;
-    const activeBoarded = busLocations.reduce(
-      (sum, loc) => sum + (loc.boardedCount ?? 0),
-      0,
-    );
-    const pct = Math.round((activeBoarded / totalCap) * 100);
-    return Math.min(pct, 100);
-  }, [buses, busLocations]);
+  // Numeric per-bus occupancy (not whole-fleet percentage)
+  const selectedBusOccupancy = useMemo(() => {
+    const targetBus =
+      selectedMapBusFilter !== 'all'
+        ? buses.find((b) => b.busId === selectedMapBusFilter)
+        : buses[0];
+    if (!targetBus) {
+      return { label: '0 / 45 seats', sub: 'No Bus Registered' };
+    }
+    const loc = busLocations.find((l) => l.busId === targetBus.busId);
+    const boarded = loc?.boardedCount ?? 0;
+    const cap = targetBus.capacity ?? 45;
+    return {
+      label: `${boarded} / ${cap}`,
+      sub: `${targetBus.busId} Seating Strength`,
+    };
+  }, [buses, busLocations, selectedMapBusFilter]);
 
-  // Only render real tracked bus locations on map (no fake live bus marker)
+  // Display only requested bus on map when filtered (or active tracked buses)
   const displayLocations = useMemo(() => {
+    if (selectedMapBusFilter !== 'all') {
+      return busLocations.filter((l) => l.busId === selectedMapBusFilter);
+    }
     const activeBusIds = new Set(
       trips
         .filter((t) => t.status === 'active' || t.status === 'sos')
@@ -462,19 +655,23 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
       return busLocations.filter((l) => activeBusIds.has(l.busId));
     }
     return busLocations;
-  }, [busLocations, trips]);
+  }, [busLocations, trips, selectedMapBusFilter]);
 
-  // Filtered attendance records
-  const filteredAttendanceLogs = useMemo(() => {
-    if (!searchQuery.trim()) return attendanceLogs;
-    const q = searchQuery.toLowerCase();
-    return attendanceLogs.filter(
-      (log) =>
-        (log.studentName && log.studentName.toLowerCase().includes(q)) ||
-        (log.studentId && log.studentId.toLowerCase().includes(q)) ||
-        (log.busId && log.busId.toLowerCase().includes(q)),
-    );
-  }, [attendanceLogs, searchQuery]);
+  const mapRouteOverlay = useMemo(() => {
+    const targetBusId =
+      selectedMapBusFilter !== 'all'
+        ? selectedMapBusFilter
+        : displayLocations[0]?.busId;
+    if (!targetBusId) return { stops: [], polyline: [] as Array<[number, number]> };
+    const bus = buses.find((b) => b.busId === targetBusId);
+    const loc = busLocations.find((l) => l.busId === targetBusId);
+    const stops = parseStopsJson(loc?.stopsJson || bus?.stopsJson);
+    const rawPoly = parsePolylineJson(loc?.routePolylineJson || bus?.routePolylineJson);
+    return {
+      stops,
+      polyline: rawPoly.length >= 2 ? rawPoly : fallbackStraightPolyline(stops),
+    };
+  }, [selectedMapBusFilter, displayLocations, buses, busLocations]);
 
   // Formula-safe RFC 4180 CSV Export Handler
   const handleExportCsv = () => {
@@ -546,7 +743,7 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
           <button
             type="button"
             className="sos-resolve-btn"
-            onClick={() => activeSosTrips.forEach((t) => handleResolveSos(t.id))}
+            onClick={() => activeSosTrips.forEach((t) => handleResolveSos(t.id, t.busId))}
           >
             Resolve / Dismiss Alert
           </button>
@@ -614,7 +811,10 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
         <button
           type="button"
           className={`tab-btn ${activeTab === 'buses' ? 'active' : ''}`}
-          onClick={() => setActiveTab('buses')}
+          onClick={() => {
+            setSelectedDetailBusId(null);
+            setActiveTab('buses');
+          }}
         >
           <BusIcon size={16} className={activeTab === 'buses' ? 'text-emerald-400' : ''} />
           <span>Manage Buses</span>
@@ -629,6 +829,18 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
           <Users size={16} className={activeTab === 'users' ? 'text-emerald-400' : ''} />
           <span>Passengers &amp; Staff</span>
           <span className="tab-count-badge">{users.length}</span>
+        </button>
+
+        <button
+          type="button"
+          className={`tab-btn ${activeTab === 'sos' ? 'active' : ''}`}
+          onClick={() => setActiveTab('sos')}
+        >
+          <ShieldAlert size={16} className={activeTab === 'sos' ? 'text-red-400' : ''} />
+          <span>SOS Console</span>
+          {activeSosCount > 0 && (
+            <span className="tab-alert-badge">{activeSosCount}</span>
+          )}
         </button>
       </nav>
 
@@ -686,13 +898,13 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
 
             <div className="kpi-card">
               <div className="kpi-header">
-                <span className="kpi-label">Fleet Occupancy</span>
+                <span className="kpi-label">Bus Occupancy</span>
                 <div className="kpi-icon-box bg-purple-500/10 text-purple-400">
                   <ShieldCheck size={20} />
                 </div>
               </div>
-              <div className="kpi-value text-purple-400">{fleetOccupancyPct}%</div>
-              <div className="kpi-sub">Current Trip Utilization</div>
+              <div className="kpi-value text-purple-400">{selectedBusOccupancy.label}</div>
+              <div className="kpi-sub">{selectedBusOccupancy.sub}</div>
             </div>
           </section>
 
@@ -705,7 +917,7 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
             onUpdateDestination={handleUpdateTripDestination}
           />
 
-          {/* Main Grid: Map & Attendance Ledger */}
+          {/* Main Split Grid: Left = Live Map, Right = Movable Calendar & Live Attendance */}
           <main className="dashboard-grid">
             {/* Live Fleet Map */}
             <section className="dashboard-panel map-panel">
@@ -714,28 +926,43 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
                   <Navigation size={18} className="text-emerald-400" />
                   <h2 className="panel-title">Live Fleet Map</h2>
                 </div>
-                <div className="map-layer-switcher">
-                  <button
-                    type="button"
-                    className={`layer-switch-btn ${mapLayer === 'street' ? 'active' : ''}`}
-                    onClick={() => setMapLayer('street')}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <select
+                    value={selectedMapBusFilter}
+                    onChange={(e) => setSelectedMapBusFilter(e.target.value)}
+                    className="text-xs bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-200"
+                    title="Filter Map & Calendar by Bus"
                   >
-                    Street
-                  </button>
-                  <button
-                    type="button"
-                    className={`layer-switch-btn ${mapLayer === 'satellite' ? 'active' : ''}`}
-                    onClick={() => setMapLayer('satellite')}
-                  >
-                    Satellite
-                  </button>
+                    <option value="all">All Active Buses</option>
+                    {buses.map((b) => (
+                      <option key={b.busId} value={b.busId}>
+                        {b.busId} — {b.routeName}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="map-layer-switcher">
+                    <button
+                      type="button"
+                      className={`layer-switch-btn ${mapLayer === 'street' ? 'active' : ''}`}
+                      onClick={() => setMapLayer('street')}
+                    >
+                      Street
+                    </button>
+                    <button
+                      type="button"
+                      className={`layer-switch-btn ${mapLayer === 'satellite' ? 'active' : ''}`}
+                      onClick={() => setMapLayer('satellite')}
+                    >
+                      Satellite
+                    </button>
+                  </div>
                 </div>
               </div>
 
               <div className="map-container-wrapper">
                 <MapContainer
                   center={[16.4632, 80.5064]}
-                  zoom={15}
+                  zoom={14}
                   scrollWheelZoom={true}
                   className="leaflet-map"
                 >
@@ -752,6 +979,28 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
                       url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                     />
                   )}
+                  {mapRouteOverlay.polyline.length >= 2 && (
+                    <Polyline
+                      positions={mapRouteOverlay.polyline}
+                      pathOptions={{ color: '#10b981', weight: 4, opacity: 0.75 }}
+                    />
+                  )}
+                  {mapRouteOverlay.stops.map((stop, idx) => (
+                    <Marker
+                      key={`stop-${stop.order}-${idx}`}
+                      position={[stop.lat, stop.lng]}
+                      icon={
+                        new L.DivIcon({
+                          className: 'stop-pin-marker',
+                          html: `<div style="background:#2563eb;color:#fff;width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:10px;border:2px solid #fff;">${idx + 1}</div>`,
+                          iconSize: [20, 20],
+                          iconAnchor: [10, 10],
+                        })
+                      }
+                    >
+                      <Popup>Stop #{idx + 1}: {stop.name}</Popup>
+                    </Marker>
+                  ))}
                   {displayLocations.map((bus) => (
                     <Marker
                       key={bus.busId}
@@ -798,113 +1047,69 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
               </div>
             </section>
 
-            {/* Live Attendance Ledger */}
-            <section className="dashboard-panel ledger-panel">
-              <div className="panel-header">
-                <div className="panel-title-group">
-                  <Users size={18} className="text-emerald-400" />
-                  <h2 className="panel-title">Live Attendance Ledger</h2>
-                </div>
-                <div className="ledger-controls">
-                  <div className="search-box">
-                    <Search size={15} className="search-icon" />
-                    <input
-                      type="text"
-                      placeholder="Search passenger, ID, bus..."
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      className="search-input"
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    onClick={handleExportCsv}
-                    title="Download CSV"
-                  >
-                    <Download size={16} />
-                    <span>Export CSV</span>
-                  </button>
-                </div>
-              </div>
-
-              <div className="table-responsive">
-                <table className="ledger-table">
-                  <thead>
-                    <tr>
-                      <th>Passenger Name</th>
-                      <th>Login ID</th>
-                      <th>Bus ID</th>
-                      <th>Scanned At</th>
-                      <th>GPS Coordinates</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredAttendanceLogs.length > 0 ? (
-                      filteredAttendanceLogs.map((log) => (
-                        <tr key={log.id}>
-                          <td className="font-semibold text-slate-100">
-                            {log.studentName || 'Passenger'}
-                          </td>
-                          <td className="text-slate-400 font-mono text-xs">
-                            {log.studentId}
-                          </td>
-                          <td>
-                            <span className="bus-pill">{log.busId}</span>
-                          </td>
-                          <td className="text-slate-300 text-xs">
-                            {log.scannedAt
-                              ? new Date(log.scannedAt).toLocaleTimeString()
-                              : 'Just now'}
-                          </td>
-                          <td className="text-slate-400 font-mono text-xs">
-                            {log.scanLat != null && log.scanLng != null
-                              ? `${log.scanLat.toFixed(4)}, ${log.scanLng.toFixed(4)}`
-                              : 'Campus Stop'}
-                          </td>
-                        </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td colSpan={5} className="empty-row">
-                          <div className="empty-state">
-                            <RefreshCw size={24} className="text-slate-500 animate-spin" />
-                            <span>Awaiting scan entries or no matching records found</span>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
+            {/* Right Half: Movable Month Calendar + Date Summary + Live Attendance */}
+            <OperationsCalendarPanel
+              trips={trips}
+              attendanceLogs={attendanceLogs}
+              selectedBusFilter={selectedMapBusFilter}
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              onExportCsv={handleExportCsv}
+            />
           </main>
         </div>
       )}
 
-      {/* VIEW 2: Manage Buses */}
+      {/* VIEW 2: Manage Buses & Admin-Only Bus Detail View */}
       {activeTab === 'buses' && (
-        <BusesManager
-          buses={buses}
-          trips={trips}
-          busLocations={busLocations}
-          onAddBus={handleAddBus}
-          onUpdateBus={handleUpdateBus}
-          onRotateSecret={handleRotateSecret}
-          onDeleteBus={handleDeleteBus}
-        />
+        selectedDetailBusId && buses.some((b) => b.busId === selectedDetailBusId) ? (
+          <BusDetailView
+            bus={buses.find((b) => b.busId === selectedDetailBusId)!}
+            location={busLocations.find((l) => l.busId === selectedDetailBusId)}
+            trips={trips}
+            users={users}
+            attendanceLogs={attendanceLogs}
+            onBack={() => setSelectedDetailBusId(null)}
+            onSetAllowUnpaidUntil={handleSetAllowUnpaidUntil}
+            onManualBoardPassenger={handleManualBoardPassenger}
+          />
+        ) : (
+          <BusesManager
+            buses={buses}
+            trips={trips}
+            busLocations={busLocations}
+            onSelectBusDetail={(busId) => setSelectedDetailBusId(busId)}
+            onAddBus={handleAddBus}
+            onUpdateBus={handleUpdateBus}
+            onRotateSecret={handleRotateSecret}
+            onDeleteBus={handleDeleteBus}
+          />
+        )
       )}
 
-      {/* VIEW 3: Students & Staff */}
+      {/* VIEW 3: Passengers & Staff */}
       {activeTab === 'users' && (
         <UsersManager
           users={users}
           buses={buses}
           onAddUser={handleAddUser}
           onUpdateUser={handleUpdateUser}
+          onBulkUpsertFeeUser={handleBulkUpsertFeeUser}
           onToggleFeePaid={handleToggleFeePaid}
           onDeleteUser={handleDeleteUser}
+          onBulkDeleteUsers={handleBulkDeleteUsers}
           onSeedSampleData={handleSeedSampleData}
+        />
+      )}
+
+      {/* VIEW 4: Separate SOS Console */}
+      {activeTab === 'sos' && (
+        <SosConsoleView
+          buses={buses}
+          trips={trips}
+          busLocations={busLocations}
+          onTriggerBuzzer={handleTriggerEmergencyBuzzer}
+          onResolveSos={handleResolveSos}
         />
       )}
     </div>
