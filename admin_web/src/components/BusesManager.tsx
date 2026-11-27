@@ -1,5 +1,6 @@
-import { useState, useMemo, type FC, type FormEvent } from 'react';
+import { useState, useMemo, useRef, useEffect, type FC, type FormEvent } from 'react';
 import type { Schema } from '../../amplify/data/resource';
+import { generateSecureQrSecret } from '../utils/crypto';
 import {
   Bus as BusIcon,
   PlusCircle,
@@ -61,17 +62,25 @@ export const BusesManager: FC<BusesManagerProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [revealedSecrets, setRevealedSecrets] = useState<Record<string, boolean>>({});
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => setToastMessage(null), 3000);
   };
 
-  const generateRandomSecret = (busId: string) => {
-    const id = busId.trim() || 'BUS_XX';
-    const rand = Math.random().toString(36).substring(2, 8).toUpperCase();
-    return `SECRET_KEY_${id}_${rand}_2026`;
-  };
+  const generateRandomSecret = (busId: string) => generateSecureQrSecret(busId);
 
   const handleOpenAddModal = () => {
     setEditingBus(null);
@@ -95,25 +104,32 @@ export const BusesManager: FC<BusesManagerProps> = ({
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!formBusId || !formRouteName) return;
+    const cleanId = formBusId.toUpperCase().trim();
+    const cleanRoute = formRouteName.trim();
+    if (!cleanId || !cleanRoute) return;
+
+    if (!editingBus && buses.some((b) => b.busId.toUpperCase() === cleanId)) {
+      alert(`Bus ID "${cleanId}" is already registered.`);
+      return;
+    }
 
     try {
       setIsSubmitting(true);
       if (editingBus) {
         await onUpdateBus({
-          busId: formBusId,
-          routeName: formRouteName,
-          capacity: parseInt(formCapacity, 10) || 45,
+          busId: editingBus.busId,
+          routeName: cleanRoute,
+          capacity: Math.min(Math.max(parseInt(formCapacity, 10) || 45, 1), 120),
         });
-        showToast(`Bus ${formBusId} updated successfully`);
+        showToast(`Bus ${editingBus.busId} updated successfully`);
       } else {
         await onAddBus({
-          busId: formBusId.toUpperCase().trim(),
-          routeName: formRouteName.trim(),
-          capacity: parseInt(formCapacity, 10) || 45,
-          qrSecret: formQrSecret.trim() || generateRandomSecret(formBusId),
+          busId: cleanId,
+          routeName: cleanRoute,
+          capacity: Math.min(Math.max(parseInt(formCapacity, 10) || 45, 1), 120),
+          qrSecret: formQrSecret.trim() || generateRandomSecret(cleanId),
         });
-        showToast(`Bus ${formBusId} registered successfully`);
+        showToast(`Bus ${cleanId} registered successfully`);
       }
       setIsModalOpen(false);
     } catch (err) {

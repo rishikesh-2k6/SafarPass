@@ -4,17 +4,20 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import '../models/user_session.dart';
 import '../services/driver_telemetry_service.dart';
 
 class DriverScreen extends StatefulWidget {
-  const DriverScreen({super.key});
+  final UserSession session;
+
+  const DriverScreen({super.key, required this.session});
 
   @override
   State<DriverScreen> createState() => _DriverScreenState();
 }
 
 class _DriverScreenState extends State<DriverScreen> {
-  final DriverTelemetryService _telemetryService = DriverTelemetryService();
+  late final DriverTelemetryService _telemetryService;
   final FlutterTts _flutterTts = FlutterTts();
 
   bool _isTripActive = false;
@@ -31,6 +34,7 @@ class _DriverScreenState extends State<DriverScreen> {
   @override
   void initState() {
     super.initState();
+    _telemetryService = DriverTelemetryService(session: widget.session);
     _initWakelockAndTts();
     _setupListeners();
   }
@@ -43,7 +47,7 @@ class _DriverScreenState extends State<DriverScreen> {
     }
 
     try {
-      await _flutterTts.setLanguage("en-US");
+      await _flutterTts.setLanguage('en-US');
       await _flutterTts.setSpeechRate(0.5);
       await _flutterTts.setVolume(1.0);
       await _flutterTts.setPitch(1.0);
@@ -67,7 +71,7 @@ class _DriverScreenState extends State<DriverScreen> {
           _speakBoarded(count);
         }
         setState(() {
-          _previousBoardedCount = _boardedCount;
+          _previousBoardedCount = count;
           _boardedCount = count;
         });
       }
@@ -75,9 +79,21 @@ class _DriverScreenState extends State<DriverScreen> {
 
     _tripStateSub = _telemetryService.tripStateStream.listen((isActive) {
       if (mounted) {
+        final bool wasActive = _isTripActive;
         setState(() {
           _isTripActive = isActive;
+          if (!isActive) {
+            _currentQrPayload = '';
+          }
         });
+        if (wasActive && !isActive) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              backgroundColor: Color(0xFF0F172A),
+              content: Text('Trip concluded by fleet dispatch.'),
+            ),
+          );
+        }
       }
     });
   }
@@ -128,8 +144,8 @@ class _DriverScreenState extends State<DriverScreen> {
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: Row(
-            children: const [
+          title: const Row(
+            children: [
               Icon(Icons.location_off_rounded, color: Colors.amber, size: 28),
               SizedBox(width: 8),
               Text('Location Required'),
@@ -158,25 +174,12 @@ class _DriverScreenState extends State<DriverScreen> {
           ],
         ),
       );
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          backgroundColor: const Color(0xFF0F172A),
-          duration: const Duration(seconds: 8),
-          content: Text(errorMsg),
-          action: SnackBarAction(
-            label: 'Open Settings',
-            textColor: const Color(0xFF10B981),
-            onPressed: () async {
-              await Geolocator.openAppSettings();
-              await Geolocator.openLocationSettings();
-            },
-          ),
-        ),
-      );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to start trip: $errorMsg')),
+        SnackBar(
+          backgroundColor: const Color(0xFFEF4444),
+          content: Text('Failed to start trip: $errorMsg'),
+        ),
       );
     }
   }
@@ -243,12 +246,45 @@ class _DriverScreenState extends State<DriverScreen> {
     }
   }
 
+  Future<void> _handleLogout() async {
+    if (_isTripActive) {
+      final bool? confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Active Trip Running'),
+          content: const Text(
+            'Logging out will end the active trip and stop GPS broadcasting. Continue?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Stay'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFEF4444),
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('End Trip & Logout'),
+            ),
+          ],
+        ),
+      );
+      if (confirm != true) return;
+      await _telemetryService.endTrip();
+    }
+    if (mounted) {
+      Navigator.pop(context);
+    }
+  }
+
   Future<void> _handleTriggerSos() async {
     final bool? confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Row(
-          children: const [
+        title: const Row(
+          children: [
             Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 28),
             SizedBox(width: 8),
             Text('Confirm Emergency SOS',
@@ -284,7 +320,7 @@ class _DriverScreenState extends State<DriverScreen> {
           const SnackBar(
             backgroundColor: Color(0xFFB45309),
             duration: Duration(seconds: 4),
-            content: Text('🚨 EMERGENCY SOS SENT! Dispatchers notified.'),
+            content: Text('EMERGENCY SOS SENT! Dispatchers notified.'),
           ),
         );
       }
@@ -304,12 +340,18 @@ class _DriverScreenState extends State<DriverScreen> {
     _tripStateSub?.cancel();
     _telemetryService.dispose();
     _flutterTts.stop();
-    WakelockPlus.disable();
+    try {
+      WakelockPlus.disable();
+    } catch (_) {}
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final String busId = widget.session.assignedBusId;
+    final String driverLabel =
+        '${widget.session.loginId} • ${widget.session.fullName}';
+
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
@@ -327,9 +369,9 @@ class _DriverScreenState extends State<DriverScreen> {
                   color: const Color(0xFF10B981).withValues(alpha: 0.4),
                 ),
               ),
-              child: const Text(
-                'BUS_01',
-                style: TextStyle(
+              child: Text(
+                busId,
+                style: const TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w800,
                   color: Color(0xFF065F46),
@@ -341,14 +383,16 @@ class _DriverScreenState extends State<DriverScreen> {
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
-                  Text(
+                children: [
+                  const Text(
                     'Driver Console',
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                   ),
                   Text(
-                    'driver_01 • Rajesh Kumar',
-                    style: TextStyle(fontSize: 11, color: Color(0xFF64748B)),
+                    driverLabel,
+                    overflow: TextOverflow.ellipsis,
+                    style:
+                        const TextStyle(fontSize: 11, color: Color(0xFF64748B)),
                   ),
                 ],
               ),
@@ -360,7 +404,7 @@ class _DriverScreenState extends State<DriverScreen> {
             tooltip: 'Logout',
             icon: const Icon(Icons.logout_rounded,
                 color: Color(0xFF64748B), size: 20),
-            onPressed: () => Navigator.pop(context),
+            onPressed: _handleLogout,
           ),
         ],
       ),
@@ -377,13 +421,15 @@ class _DriverScreenState extends State<DriverScreen> {
   }
 
   Widget _buildIdleState() {
+    final String busId = widget.session.assignedBusId;
+    final String routeName = widget.session.routeName;
+
     return Center(
       child: SingleChildScrollView(
         padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 20.0),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Centered Hero Card
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
@@ -401,7 +447,6 @@ class _DriverScreenState extends State<DriverScreen> {
               ),
               child: Column(
                 children: [
-                  // GPS Readiness Pill
                   Container(
                     padding:
                         const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
@@ -436,27 +481,24 @@ class _DriverScreenState extends State<DriverScreen> {
                     ),
                   ),
                   const SizedBox(height: 14),
-
-                  // Route Label
-                  const Text(
-                    'Campus Loop • Route 01',
-                    style: TextStyle(
+                  Text(
+                    routeName,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.w800,
                       color: Color(0xFF0F172A),
                     ),
                   ),
                   const SizedBox(height: 4),
-                  const Text(
-                    'Bus: BUS_01 • Amrita Amaravati',
-                    style: TextStyle(
+                  Text(
+                    'Bus: $busId • ${widget.session.busCapacity} Seats',
+                    style: const TextStyle(
                       fontSize: 12,
                       color: Color(0xFF64748B),
                     ),
                   ),
                   const SizedBox(height: 32),
-
-                  // Bold 190x190 Circular Emerald START TRIP button
                   Container(
                     width: 190,
                     height: 190,
@@ -482,9 +524,9 @@ class _DriverScreenState extends State<DriverScreen> {
                       child: InkWell(
                         customBorder: const CircleBorder(),
                         onTap: _handleStartTrip,
-                        child: Column(
+                        child: const Column(
                           mainAxisAlignment: MainAxisAlignment.center,
-                          children: const [
+                          children: [
                             Icon(
                               Icons.directions_bus_rounded,
                               size: 64,
@@ -547,47 +589,48 @@ class _DriverScreenState extends State<DriverScreen> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                // Live GPS Accuracy Pill
-                ValueListenableBuilder<String>(
-                  valueListenable: _telemetryService.gpsStatus,
-                  builder: (context, statusText, _) {
-                    final bool isSim = _simulateMovement;
-                    final bool isLiveOk = statusText.contains('Live GPS');
+                Expanded(
+                  child: ValueListenableBuilder<String>(
+                    valueListenable: _telemetryService.gpsStatus,
+                    builder: (context, statusText, _) {
+                      final bool isSim = _simulateMovement;
+                      final bool isLiveOk = statusText.contains('Live GPS');
 
-                    return Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: isSim
-                                ? Colors.blue.shade600
-                                : (isLiveOk
-                                    ? const Color(0xFF10B981)
-                                    : Colors.amber.shade700),
-                            shape: BoxShape.circle,
+                      return Row(
+                        children: [
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              color: isSim
+                                  ? Colors.blue.shade600
+                                  : (isLiveOk
+                                      ? const Color(0xFF10B981)
+                                      : Colors.amber.shade700),
+                              shape: BoxShape.circle,
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          isSim ? 'Simulated Route' : statusText,
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            color: isSim
-                                ? Colors.blue.shade800
-                                : (isLiveOk
-                                    ? const Color(0xFF065F46)
-                                    : Colors.amber.shade900),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              isSim ? 'Simulated Route' : statusText,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: isSim
+                                    ? Colors.blue.shade800
+                                    : (isLiveOk
+                                        ? const Color(0xFF065F46)
+                                        : Colors.amber.shade900),
+                              ),
+                            ),
                           ),
-                        ),
-                      ],
-                    );
-                  },
+                        ],
+                      );
+                    },
+                  ),
                 ),
-
-                // Clean Simulate Route Switch
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -637,7 +680,6 @@ class _DriverScreenState extends State<DriverScreen> {
             ),
             child: Column(
               children: [
-                // Subtitle / Refresh label
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -656,8 +698,8 @@ class _DriverScreenState extends State<DriverScreen> {
                         color: const Color(0xFFECFDF5),
                         borderRadius: BorderRadius.circular(8),
                       ),
-                      child: Row(
-                        children: const [
+                      child: const Row(
+                        children: [
                           Icon(Icons.autorenew_rounded,
                               size: 13, color: Color(0xFF10B981)),
                           SizedBox(width: 4),
@@ -675,8 +717,6 @@ class _DriverScreenState extends State<DriverScreen> {
                   ],
                 ),
                 const SizedBox(height: 16),
-
-                // Centered 200x200 QrImageView
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
@@ -710,8 +750,6 @@ class _DriverScreenState extends State<DriverScreen> {
                   ),
                 ),
                 const SizedBox(height: 18),
-
-                // High-Contrast Passengers Boarded Counter Badge
                 Container(
                   width: double.infinity,
                   padding:
@@ -723,9 +761,9 @@ class _DriverScreenState extends State<DriverScreen> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Column(
+                      const Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
-                        children: const [
+                        children: [
                           Text(
                             'PASSENGERS BOARDED',
                             style: TextStyle(
@@ -769,17 +807,17 @@ class _DriverScreenState extends State<DriverScreen> {
           ),
           const SizedBox(height: 18),
 
-          // Bottom Action Row: Side-by-side 54px-tall buttons
+          // Bottom Action Row
           Row(
             children: [
-              // Outlined / Amber SOS ALERT button (flex: 1)
               Expanded(
                 flex: 1,
                 child: SizedBox(
                   height: 54,
                   child: OutlinedButton.icon(
                     style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: Color(0xFFD97706), width: 1.5),
+                      side: const BorderSide(
+                          color: Color(0xFFD97706), width: 1.5),
                       backgroundColor: const Color(0xFFFFFBEB),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(14),
@@ -803,8 +841,6 @@ class _DriverScreenState extends State<DriverScreen> {
                 ),
               ),
               const SizedBox(width: 12),
-
-              // Solid Red END TRIP button (flex: 2)
               Expanded(
                 flex: 2,
                 child: SizedBox(

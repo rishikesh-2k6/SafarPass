@@ -1,119 +1,90 @@
-// ignore_for_file: unnecessary_import
 import 'dart:async';
-import 'dart:convert';
-import 'package:amplify_api/amplify_api.dart';
-import 'package:amplify_flutter/amplify_flutter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../models/user_session.dart';
 import '../services/student_boarding_service.dart';
 
 class ParentScreen extends StatefulWidget {
-  const ParentScreen({super.key});
+  final UserSession session;
+
+  const ParentScreen({super.key, required this.session});
 
   @override
   State<ParentScreen> createState() => _ParentScreenState();
 }
 
 class _ParentScreenState extends State<ParentScreen> {
-  final StudentBoardingService _boardingService = StudentBoardingService();
+  late final StudentBoardingService _boardingService;
   final MapController _mapController = MapController();
 
-  static const String studentId = 'student_01';
-  static const String studentName = 'Rishikesh';
-  static const String rollNumber = '24AIE001';
-  static const String assignedBusId = 'BUS_01';
-
-  BusLocationData _busLocation = BusLocationData.initial(busId: assignedBusId);
+  late BusLocationData _busLocation;
   StreamSubscription<BusLocationData>? _busLocationSub;
-  StreamSubscription<GraphQLResponse<String>>? _attendanceSubscription;
+  Timer? _wardPollTimer;
 
-  String _boardingBannerStatus = 'Waiting to Board';
+  String _boardingBannerStatus = 'Checking status...';
   bool _isBoarded = false;
-  bool _isSatellite = false; // Street vs Satellite toggle
+  bool _isSos = false;
+  bool _isSatellite = false;
+  bool _isMapReady = false;
   String? _boardedTimestamp;
+  String? _activeDriverId;
+
+  String get _wardName =>
+      widget.session.wardName ?? widget.session.wardLoginId ?? 'Student';
+  String get _wardLoginId =>
+      widget.session.wardLoginId ?? widget.session.parentOfStudentId ?? '';
+  String get _assignedBusId =>
+      widget.session.wardBusId ?? widget.session.assignedBusId;
 
   @override
   void initState() {
     super.initState();
+    _boardingService = StudentBoardingService(session: widget.session);
     _busLocation = _boardingService.currentBusLocation;
+
     _busLocationSub = _boardingService.busLocationStream.listen((loc) {
       if (mounted) {
         setState(() {
           _busLocation = loc;
         });
-        _mapController.move(
-            LatLng(loc.lat, loc.lng), _mapController.camera.zoom);
+        if (_isMapReady) {
+          _mapController.move(
+            LatLng(loc.lat, loc.lng),
+            _mapController.camera.zoom,
+          );
+        }
       }
     });
 
-    _subscribeToAttendanceLogs();
+    _refreshWardStatus();
+    _wardPollTimer = Timer.periodic(
+      const Duration(seconds: 8),
+      (_) => _refreshWardStatus(),
+    );
   }
 
-  void _subscribeToAttendanceLogs() {
-    const String onCreateAttendanceLogSubscription = r'''
-      subscription OnCreateAttendanceLog {
-        onCreateAttendanceLog {
-          id
-          tripId
-          busId
-          studentId
-          studentName
-          scanLat
-          scanLng
-          scannedAt
-        }
-      }
-    ''';
+  Future<void> _refreshWardStatus() async {
+    final status = await _boardingService.fetchParentWardStatus();
+    if (!mounted || !status.success) return;
 
-    try {
-      final request = GraphQLRequest<String>(
-        document: onCreateAttendanceLogSubscription,
-      );
-      final Stream<GraphQLResponse<String>> operation = Amplify.API.subscribe(
-        request,
-        onEstablished: () => safePrint('Parent attendance subscription active'),
-      );
+    final bool boarded = status.boarded;
+    final String busLabel = status.boardedBusId ?? _assignedBusId;
+    final String? formattedTime =
+        status.boardedAt != null ? _formatTime(status.boardedAt!.toLocal()) : null;
 
-      _attendanceSubscription = operation.listen(
-        (event) {
-          if (event.data != null) {
-            try {
-              final Map<String, dynamic> map =
-                  jsonDecode(event.data!) as Map<String, dynamic>;
-              final Map<String, dynamic>? log =
-                  map['onCreateAttendanceLog'] as Map<String, dynamic>?;
-
-              if (log != null && log['studentId'] == studentId) {
-                final String? scannedAtStr = log['scannedAt'] as String?;
-                final DateTime dt = scannedAtStr != null
-                    ? (DateTime.tryParse(scannedAtStr)?.toLocal() ??
-                        DateTime.now())
-                    : DateTime.now();
-
-                final String formattedTime = _formatTime(dt);
-
-                if (mounted) {
-                  setState(() {
-                    _isBoarded = true;
-                    _boardedTimestamp = formattedTime;
-                    _boardingBannerStatus =
-                        'Boarded $assignedBusId at $formattedTime';
-                  });
-                }
-              }
-            } catch (e) {
-              safePrint('Error decoding parent attendance log event: $e');
-            }
-          }
-        },
-        onError: (err) =>
-            safePrint('Parent attendance subscription error: $err'),
-      );
-    } catch (e) {
-      safePrint('Failed to initialize parent attendance subscription: $e');
-    }
+    setState(() {
+      _isBoarded = boarded;
+      _boardedTimestamp = formattedTime;
+      _activeDriverId = status.activeDriverId;
+      _isSos = status.activeTripStatus == 'sos';
+      _boardingBannerStatus = boarded
+          ? 'Boarded $busLabel at ${formattedTime ?? "today"}'
+          : (status.activeTripStatus == 'active'
+              ? 'Bus En Route • Waiting to Board'
+              : 'Waiting to Board');
+    });
   }
 
   String _formatTime(DateTime dt) {
@@ -142,8 +113,8 @@ class _ParentScreenState extends State<ParentScreen> {
 
   @override
   void dispose() {
+    _wardPollTimer?.cancel();
     _busLocationSub?.cancel();
-    _attendanceSubscription?.cancel();
     _boardingService.dispose();
     _mapController.dispose();
     super.dispose();
@@ -159,18 +130,27 @@ class _ParentScreenState extends State<ParentScreen> {
         foregroundColor: const Color(0xFF0F172A),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: const [
-            Text(
+          children: [
+            const Text(
               'Parent Live View',
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
             ),
             Text(
-              'Live Transit & Attendance Tracking',
-              style: TextStyle(fontSize: 11, color: Color(0xFF64748B)),
+              'Welcome, ${widget.session.fullName}',
+              style: const TextStyle(fontSize: 11, color: Color(0xFF64748B)),
             ),
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Refresh status',
+            icon: const Icon(
+              Icons.refresh_rounded,
+              color: Color(0xFF64748B),
+              size: 20,
+            ),
+            onPressed: _refreshWardStatus,
+          ),
           IconButton(
             tooltip: 'Logout',
             icon: const Icon(
@@ -188,11 +168,37 @@ class _ParentScreenState extends State<ParentScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Top Status Card
+              if (_isSos) ...[
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFEF2F2),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFEF4444)),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.warning_amber_rounded,
+                          color: Color(0xFFDC2626), size: 20),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'EMERGENCY SOS flagged on assigned bus. Campus dispatch notified.',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF991B1B),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
               _buildTopStatusCard(),
               const SizedBox(height: 14),
-
-              // Expanded Live Map Card
               Expanded(
                 child: _buildExpandedMapCard(),
               ),
@@ -224,7 +230,6 @@ class _ParentScreenState extends State<ParentScreen> {
       ),
       child: Row(
         children: [
-          // Status Icon badge
           Container(
             width: 44,
             height: 44,
@@ -243,8 +248,6 @@ class _ParentScreenState extends State<ParentScreen> {
             ),
           ),
           const SizedBox(width: 14),
-
-          // Status & Student info
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -252,16 +255,20 @@ class _ParentScreenState extends State<ParentScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(
-                      _boardingBannerStatus,
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w800,
-                        color: isBoarded
-                            ? const Color(0xFF065F46)
-                            : const Color(0xFFB45309),
+                    Expanded(
+                      child: Text(
+                        _boardingBannerStatus,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w800,
+                          color: isBoarded
+                              ? const Color(0xFF065F46)
+                              : const Color(0xFFB45309),
+                        ),
                       ),
                     ),
+                    const SizedBox(width: 8),
                     Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 8, vertical: 3),
@@ -270,7 +277,7 @@ class _ParentScreenState extends State<ParentScreen> {
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Text(
-                        assignedBusId,
+                        _assignedBusId,
                         style: const TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.bold,
@@ -283,8 +290,9 @@ class _ParentScreenState extends State<ParentScreen> {
                 const SizedBox(height: 3),
                 Text(
                   isBoarded
-                      ? 'Ward: $studentName ($rollNumber) • Boarded at ${_boardedTimestamp ?? "recently"}'
-                      : 'Ward: $studentName ($rollNumber) • Driver: driver_01',
+                      ? 'Ward: $_wardName ($_wardLoginId) • Boarded at ${_boardedTimestamp ?? "recently"}'
+                      : 'Ward: $_wardName ($_wardLoginId) • Driver: ${_activeDriverId ?? "Standby"}',
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     fontSize: 12,
                     color: Color(0xFF64748B),
@@ -321,6 +329,9 @@ class _ParentScreenState extends State<ParentScreen> {
               options: MapOptions(
                 initialCenter: LatLng(_busLocation.lat, _busLocation.lng),
                 initialZoom: 15.0,
+                onMapReady: () {
+                  _isMapReady = true;
+                },
               ),
               children: [
                 TileLayer(
@@ -341,8 +352,6 @@ class _ParentScreenState extends State<ParentScreen> {
                 ),
               ],
             ),
-
-            // Top-right Street / Satellite toggle chip
             Positioned(
               top: 12,
               right: 12,
@@ -392,8 +401,6 @@ class _ParentScreenState extends State<ParentScreen> {
                 ),
               ),
             ),
-
-            // Recenter Floating Button (above footer)
             Positioned(
               bottom: 86,
               right: 12,
@@ -403,16 +410,16 @@ class _ParentScreenState extends State<ParentScreen> {
                 foregroundColor: const Color(0xFF0F172A),
                 elevation: 3,
                 onPressed: () {
-                  _mapController.move(
-                    LatLng(_busLocation.lat, _busLocation.lng),
-                    16.0,
-                  );
+                  if (_isMapReady) {
+                    _mapController.move(
+                      LatLng(_busLocation.lat, _busLocation.lng),
+                      16.0,
+                    );
+                  }
                 },
                 child: const Icon(Icons.my_location_rounded, size: 18),
               ),
             ),
-
-            // Bottom Live Bus Speed / Telemetry Footer Bar with Open in Google Maps Button
             Positioned(
               bottom: 0,
               left: 0,
@@ -435,7 +442,6 @@ class _ParentScreenState extends State<ParentScreen> {
                 ),
                 child: Row(
                   children: [
-                    // Speed & Telemetry indicator
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -454,12 +460,15 @@ class _ParentScreenState extends State<ParentScreen> {
                                 ),
                               ),
                               const SizedBox(width: 6),
-                              Text(
-                                '${_busLocation.speed.toStringAsFixed(1)} km/h • Boarded: ${_busLocation.boardedCount}',
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                  color: Color(0xFF0F172A),
+                              Flexible(
+                                child: Text(
+                                  '${_busLocation.speed.toStringAsFixed(1)} km/h • Boarded: ${_busLocation.boardedCount}',
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: Color(0xFF0F172A),
+                                  ),
                                 ),
                               ),
                             ],
@@ -476,8 +485,6 @@ class _ParentScreenState extends State<ParentScreen> {
                         ],
                       ),
                     ),
-
-                    // Prominent Open in Google Maps Button
                     ElevatedButton.icon(
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF0F172A),

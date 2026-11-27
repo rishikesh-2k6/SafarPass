@@ -225,6 +225,14 @@ Because `admin_web` is a React Single-Page Application (SPA), configure the foll
 - **Target address**: `/index.html`
 - **Type**: `200 (Rewrite)` (or `404 (Rewrite)`)
 
+#### Admin Web Cognito Authentication Setup (`ADMINS` Group)
+The Admin Web portal is protected by AWS Cognito (`ADMINS` group) so student PII, hashed PINs, and bus QR secrets are never publicly accessible:
+1. Open **AWS Amplify Console &gt; SafarPass &gt; Authentication &gt; User management** (or Amazon Cognito Console).
+2. Create an Admin user with email &amp; temporary password.
+3. Add that user to the **`ADMINS`** group.
+4. Sign in at your Amplify Hosting URL (you will be prompted to set a permanent password on first login).
+5. After backend deployment, download the updated `amplify_outputs.json` (and regenerate `mobile_app/lib/amplify_outputs.dart` if endpoint/API key changed) before building the production Android APK.
+
 ---
 
 ## 🔧 6. Common Build Issues & Quick Fixes

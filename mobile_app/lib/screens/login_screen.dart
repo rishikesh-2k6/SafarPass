@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import '../models/user_session.dart';
+import '../services/auth_session_service.dart';
 import 'driver_screen.dart';
 import 'student_screen.dart';
 import 'parent_screen.dart';
@@ -14,36 +16,14 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   UserRole _selectedRole = UserRole.driver;
-  final TextEditingController _idController =
-      TextEditingController(text: 'driver_01');
-  final TextEditingController _pinController =
-      TextEditingController(text: '1234');
+  final TextEditingController _idController = TextEditingController();
+  final TextEditingController _pinController = TextEditingController();
   bool _obscurePin = true;
   bool _isLoading = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _updateDefaultCredentials(UserRole.driver);
-  }
-
-  void _updateDefaultCredentials(UserRole role) {
+  void _selectRole(UserRole role) {
     setState(() {
       _selectedRole = role;
-      switch (role) {
-        case UserRole.driver:
-          _idController.text = 'driver_01';
-          _pinController.text = '1234';
-          break;
-        case UserRole.student:
-          _idController.text = 'student_01';
-          _pinController.text = '1234';
-          break;
-        case UserRole.parent:
-          _idController.text = '9876543210';
-          _pinController.text = '1234';
-          break;
-      }
     });
   }
 
@@ -106,20 +86,37 @@ class _LoginScreenState extends State<LoginScreen> {
     }
 
     setState(() => _isLoading = true);
-    await Future.delayed(const Duration(milliseconds: 300));
+    final AuthLoginResult result = await AuthSessionService.login(
+      loginId: id,
+      pin: pin,
+      role: _selectedRole.name,
+    );
     if (!mounted) return;
     setState(() => _isLoading = false);
+
+    if (!result.success || result.session == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: const Color(0xFFEF4444),
+          content: Text(result.message),
+        ),
+      );
+      return;
+    }
+
+    final UserSession session = result.session!;
+    _pinController.clear();
 
     Widget nextScreen;
     switch (_selectedRole) {
       case UserRole.driver:
-        nextScreen = const DriverScreen();
+        nextScreen = DriverScreen(session: session);
         break;
       case UserRole.student:
-        nextScreen = const StudentScreen();
+        nextScreen = StudentScreen(session: session);
         break;
       case UserRole.parent:
-        nextScreen = const ParentScreen();
+        nextScreen = ParentScreen(session: session);
         break;
     }
 
@@ -228,7 +225,6 @@ class _LoginScreenState extends State<LoginScreen> {
                             child: _buildRoleTab(
                               role: UserRole.driver,
                               label: 'Driver Mode',
-                              shortLabel: 'Driver',
                               icon: Icons.drive_eta_rounded,
                             ),
                           ),
@@ -236,7 +232,6 @@ class _LoginScreenState extends State<LoginScreen> {
                             child: _buildRoleTab(
                               role: UserRole.student,
                               label: 'Student Mode',
-                              shortLabel: 'Student',
                               icon: Icons.school_rounded,
                             ),
                           ),
@@ -244,7 +239,6 @@ class _LoginScreenState extends State<LoginScreen> {
                             child: _buildRoleTab(
                               role: UserRole.parent,
                               label: 'Parent Mode',
-                              shortLabel: 'Parent',
                               icon: Icons.family_restroom_rounded,
                             ),
                           ),
@@ -265,6 +259,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     const SizedBox(height: 8),
                     TextField(
                       controller: _idController,
+                      textInputAction: TextInputAction.next,
                       decoration: InputDecoration(
                         prefixIcon: Icon(_idIcon, size: 20, color: const Color(0xFF64748B)),
                         hintText: _idHint,
@@ -274,9 +269,9 @@ class _LoginScreenState extends State<LoginScreen> {
                     const SizedBox(height: 18),
 
                     // PIN Input
-                    Row(
+                    const Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: const [
+                      children: [
                         Text(
                           'Security PIN',
                           style: TextStyle(
@@ -299,7 +294,13 @@ class _LoginScreenState extends State<LoginScreen> {
                       controller: _pinController,
                       obscureText: _obscurePin,
                       keyboardType: TextInputType.number,
+                      maxLength: 6,
+                      textInputAction: TextInputAction.done,
+                      onSubmitted: (_) {
+                        if (!_isLoading) _handleLogin();
+                      },
                       decoration: InputDecoration(
+                        counterText: '',
                         prefixIcon: const Icon(
                           Icons.lock_outline_rounded,
                           size: 20,
@@ -369,7 +370,7 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
               const SizedBox(height: 24),
 
-              // Demo quick switch hints
+              // Security notice
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 decoration: BoxDecoration(
@@ -380,14 +381,14 @@ class _LoginScreenState extends State<LoginScreen> {
                 child: Row(
                   children: [
                     const Icon(
-                      Icons.info_outline_rounded,
+                      Icons.verified_user_outlined,
                       size: 18,
                       color: Color(0xFF10B981),
                     ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
-                        'Demo credentials pre-filled. Switch roles at any time.',
+                        'Verified via AWS AppSync. Contact your transport coordinator if you need a PIN reset.',
                         style: TextStyle(
                           fontSize: 12,
                           color: Colors.blueGrey.shade700,
@@ -408,13 +409,12 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget _buildRoleTab({
     required UserRole role,
     required String label,
-    required String shortLabel,
     required IconData icon,
   }) {
     final bool isSelected = _selectedRole == role;
 
     return InkWell(
-      onTap: () => _updateDefaultCredentials(role),
+      onTap: () => _selectRole(role),
       borderRadius: BorderRadius.circular(10),
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 10),
@@ -441,7 +441,6 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
             const SizedBox(height: 4),
             Text(
-              // Keep label accessible for smoke test & UI
               label,
               textAlign: TextAlign.center,
               style: TextStyle(

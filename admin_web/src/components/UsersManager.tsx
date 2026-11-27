@@ -1,5 +1,6 @@
-import { useState, useMemo, type FC, type FormEvent } from 'react';
+import { useState, useMemo, useRef, useEffect, type FC, type FormEvent } from 'react';
 import type { Schema } from '../../amplify/data/resource';
+import { generateSecurePin } from '../utils/crypto';
 import {
   Users,
   UserPlus,
@@ -8,8 +9,6 @@ import {
   Trash2,
   CheckCircle,
   X,
-  Eye,
-  EyeOff,
   Copy,
   Bus as BusIcon,
   Phone,
@@ -17,6 +16,8 @@ import {
   Sparkles,
   Check,
   AlertCircle,
+  Lock,
+  ShieldCheck,
 } from 'lucide-react';
 
 type UserProfileType = Schema['UserProfile']['type'];
@@ -38,12 +39,13 @@ interface UsersManagerProps {
   onUpdateUser: (user: {
     userId: string;
     loginId: string;
-    pin: string;
+    pin?: string;
     fullName: string;
     role: string;
     assignedBusId?: string;
     parentOfStudentId?: string;
     feePaid?: boolean;
+    unlock?: boolean;
   }) => Promise<void>;
   onToggleFeePaid: (userId: string, currentStatus: boolean) => Promise<void>;
   onDeleteUser: (userId: string) => Promise<void>;
@@ -68,7 +70,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
   const [formRole, setFormRole] = useState<'student' | 'driver' | 'parent'>('student');
   const [formFullName, setFormFullName] = useState('');
   const [formLoginId, setFormLoginId] = useState('');
-  const [formPin, setFormPin] = useState('1234');
+  const [formPin, setFormPin] = useState('');
   const [formAssignedBusId, setFormAssignedBusId] = useState('');
   const [formParentOfStudentId, setFormParentOfStudentId] = useState('');
   const [formFeePaid, setFormFeePaid] = useState(true);
@@ -76,16 +78,32 @@ export const UsersManager: FC<UsersManagerProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [revealedPins, setRevealedPins] = useState<Record<string, boolean>>({});
+  const [issuedCredential, setIssuedCredential] = useState<{
+    fullName: string;
+    loginId: string;
+    pin: string;
+    role: string;
+  } | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const toastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 30000);
+    return () => {
+      window.clearInterval(id);
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
-  };
-
-  const generateRandomPin = () => {
-    return Math.floor(1000 + Math.random() * 9000).toString();
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => setToastMessage(null), 3000);
   };
 
   // Open Add Modal
@@ -93,7 +111,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
     setEditingUser(null);
     setFormRole(defaultRole);
     setFormFullName('');
-    setFormPin(generateRandomPin());
+    setFormPin(generateSecurePin());
     setFormAssignedBusId(buses[0]?.busId || 'BUS_01');
     setFormParentOfStudentId('');
     setFormFeePaid(true);
@@ -111,13 +129,13 @@ export const UsersManager: FC<UsersManagerProps> = ({
     setIsModalOpen(true);
   };
 
-  // Open Edit Modal
+  // Open Edit Modal (existing PIN is hashed & cannot be read back; blank preserves existing)
   const handleOpenEditModal = (user: UserProfileType) => {
     setEditingUser(user);
     setFormRole((user.role as 'student' | 'driver' | 'parent') || 'student');
     setFormFullName(user.fullName);
     setFormLoginId(user.loginId);
-    setFormPin(user.pin);
+    setFormPin('');
     setFormAssignedBusId(user.assignedBusId || '');
     setFormParentOfStudentId(user.parentOfStudentId || '');
     setFormFeePaid(user.feePaid ?? true);
@@ -141,35 +159,72 @@ export const UsersManager: FC<UsersManagerProps> = ({
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!formFullName || !formLoginId || !formPin) return;
+    const cleanName = formFullName.trim();
+    const cleanLoginId = formLoginId.trim();
+    const cleanPin = formPin.trim();
+
+    if (!cleanName || !cleanLoginId) return;
+
+    if (!editingUser && !/^\d{4,6}$/.test(cleanPin)) {
+      alert('PIN must be 4 to 6 numeric digits.');
+      return;
+    }
+    if (editingUser && cleanPin.length > 0 && !/^\d{4,6}$/.test(cleanPin)) {
+      alert('New PIN must be 4 to 6 numeric digits (or leave blank to keep current PIN).');
+      return;
+    }
+
+    const duplicate = users.find(
+      (u) =>
+        u.loginId.toLowerCase() === cleanLoginId.toLowerCase() &&
+        u.userId !== editingUser?.userId,
+    );
+    if (duplicate) {
+      alert(`Login ID "${cleanLoginId}" is already assigned to ${duplicate.fullName}.`);
+      return;
+    }
 
     try {
       setIsSubmitting(true);
       if (editingUser) {
         await onUpdateUser({
           userId: editingUser.userId,
-          loginId: formLoginId.trim(),
-          pin: formPin.trim(),
-          fullName: formFullName.trim(),
+          loginId: cleanLoginId,
+          pin: cleanPin || undefined,
+          fullName: cleanName,
           role: formRole,
           assignedBusId: formAssignedBusId || undefined,
           parentOfStudentId:
             formRole === 'parent' ? formParentOfStudentId.trim() || undefined : undefined,
           feePaid: formRole === 'student' ? formFeePaid : true,
         });
-        showToast(`User ${formFullName} updated successfully`);
+        if (cleanPin) {
+          setIssuedCredential({
+            fullName: cleanName,
+            loginId: cleanLoginId,
+            pin: cleanPin,
+            role: formRole,
+          });
+        }
+        showToast(`User ${cleanName} updated successfully`);
       } else {
         await onAddUser({
-          loginId: formLoginId.trim(),
-          pin: formPin.trim(),
-          fullName: formFullName.trim(),
+          loginId: cleanLoginId,
+          pin: cleanPin,
+          fullName: cleanName,
           role: formRole,
           assignedBusId: formAssignedBusId || undefined,
           parentOfStudentId:
             formRole === 'parent' ? formParentOfStudentId.trim() || undefined : undefined,
           feePaid: formRole === 'student' ? formFeePaid : true,
         });
-        showToast(`${formFullName} registered as ${formRole}`);
+        setIssuedCredential({
+          fullName: cleanName,
+          loginId: cleanLoginId,
+          pin: cleanPin,
+          role: formRole,
+        });
+        showToast(`${cleanName} registered as ${formRole}`);
       }
       setIsModalOpen(false);
     } catch (err) {
@@ -197,19 +252,30 @@ export const UsersManager: FC<UsersManagerProps> = ({
     }
   };
 
-  const handleCopyCredentials = (user: UserProfileType) => {
-    const credText = `Login ID: ${user.loginId}\nPIN: ${user.pin}\nRole: ${user.role}`;
-    navigator.clipboard.writeText(credText);
-    setCopiedId(user.userId);
-    showToast(`Copied credentials for ${user.fullName} to clipboard`);
-    setTimeout(() => setCopiedId(null), 2000);
+  const handleUnlockUser = async (user: UserProfileType) => {
+    try {
+      await onUpdateUser({
+        userId: user.userId,
+        loginId: user.loginId,
+        fullName: user.fullName,
+        role: user.role,
+        assignedBusId: user.assignedBusId ?? undefined,
+        parentOfStudentId: user.parentOfStudentId ?? undefined,
+        feePaid: user.feePaid ?? true,
+        unlock: true,
+      });
+      showToast(`Unlocked login access for ${user.fullName}`);
+    } catch (err) {
+      console.error('Failed to unlock user:', err);
+      alert('Could not unlock user.');
+    }
   };
 
-  const toggleRevealPin = (userId: string) => {
-    setRevealedPins((prev) => ({
-      ...prev,
-      [userId]: !prev[userId],
-    }));
+  const handleCopyLoginId = (user: UserProfileType) => {
+    navigator.clipboard.writeText(user.loginId);
+    setCopiedId(user.userId);
+    showToast(`Copied Login ID "${user.loginId}"`);
+    setTimeout(() => setCopiedId(null), 2000);
   };
 
   const handleSeed = async () => {
@@ -266,6 +332,43 @@ export const UsersManager: FC<UsersManagerProps> = ({
         <div className="floating-toast">
           <CheckCircle size={18} className="text-emerald-400" />
           <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {/* One-time Issued Credential Notice (never persisted in cleartext) */}
+      {issuedCredential && (
+        <div className="mb-4 p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-between gap-4">
+          <div className="text-xs text-emerald-200">
+            <strong className="text-emerald-300 block mb-0.5">
+              One-Time Credentials for {issuedCredential.fullName} ({issuedCredential.role.toUpperCase()})
+            </strong>
+            Login ID: <code className="bg-slate-900 px-1.5 py-0.5 rounded">{issuedCredential.loginId}</code>{' '}
+            | PIN: <code className="bg-slate-900 px-1.5 py-0.5 rounded">{issuedCredential.pin}</code>{' '}
+            <span className="text-slate-400">(stored hashed; share now and dismiss)</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              className="btn-secondary text-xs py-1.5 px-2.5"
+              onClick={() => {
+                navigator.clipboard.writeText(
+                  `Login ID: ${issuedCredential.loginId}\nPIN: ${issuedCredential.pin}\nRole: ${issuedCredential.role}`,
+                );
+                showToast('One-time credentials copied to clipboard');
+              }}
+            >
+              <Copy size={13} />
+              <span>Copy</span>
+            </button>
+            <button
+              type="button"
+              className="modal-close-btn"
+              onClick={() => setIssuedCredential(null)}
+              title="Dismiss"
+            >
+              <X size={16} />
+            </button>
+          </div>
         </div>
       )}
 
@@ -361,7 +464,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
                 <th>Full Name</th>
                 <th>Role</th>
                 <th>Login ID / Roll No</th>
-                <th>PIN (Credentials)</th>
+                <th>PIN Security</th>
                 <th>Assigned Bus</th>
                 <th>Fee Status / Relation</th>
                 <th style={{ textAlign: 'right' }}>Actions</th>
@@ -369,10 +472,11 @@ export const UsersManager: FC<UsersManagerProps> = ({
             </thead>
             <tbody>
               {filteredUsers.map((user) => {
-                const isPinRevealed = !!revealedPins[user.userId];
                 const isStudent = user.role === 'student';
                 const isParent = user.role === 'parent';
                 const isDriver = user.role === 'driver';
+                const isLocked =
+                  !!user.lockedUntil && Date.parse(user.lockedUntil) > nowMs;
 
                 return (
                   <tr key={user.userId}>
@@ -421,29 +525,15 @@ export const UsersManager: FC<UsersManagerProps> = ({
                     </td>
 
                     <td>
-                      <code className="text-slate-300 font-mono text-xs bg-slate-900/60 px-2 py-1 rounded border border-slate-800">
-                        {user.loginId}
-                      </code>
-                    </td>
-
-                    <td>
                       <div className="flex items-center gap-1.5">
-                        <span className="font-mono text-xs text-amber-300 bg-slate-900/60 px-2 py-0.5 rounded border border-slate-800">
-                          {isPinRevealed ? user.pin : '••••'}
-                        </span>
+                        <code className="text-slate-300 font-mono text-xs bg-slate-900/60 px-2 py-1 rounded border border-slate-800">
+                          {user.loginId}
+                        </code>
                         <button
                           type="button"
                           className="secret-icon-btn"
-                          onClick={() => toggleRevealPin(user.userId)}
-                          title={isPinRevealed ? 'Hide PIN' : 'Reveal PIN'}
-                        >
-                          {isPinRevealed ? <EyeOff size={13} /> : <Eye size={13} />}
-                        </button>
-                        <button
-                          type="button"
-                          className="secret-icon-btn"
-                          onClick={() => handleCopyCredentials(user)}
-                          title="Copy Login & PIN"
+                          onClick={() => handleCopyLoginId(user)}
+                          title="Copy Login ID"
                         >
                           {copiedId === user.userId ? (
                             <Check size={13} className="text-emerald-400" />
@@ -451,6 +541,27 @@ export const UsersManager: FC<UsersManagerProps> = ({
                             <Copy size={13} />
                           )}
                         </button>
+                      </div>
+                    </td>
+
+                    <td>
+                      <div className="flex items-center gap-1.5">
+                        {isLocked ? (
+                          <button
+                            type="button"
+                            onClick={() => handleUnlockUser(user)}
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-300 bg-red-500/15 border border-red-500/30 px-2 py-0.5 rounded hover:bg-red-500/25"
+                            title="Account temporarily locked; click to unlock"
+                          >
+                            <Lock size={11} />
+                            <span>Locked (Unlock)</span>
+                          </button>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400/90 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded">
+                            <ShieldCheck size={11} />
+                            <span>SHA-256 Protected</span>
+                          </span>
+                        )}
                       </div>
                     </td>
 
@@ -499,7 +610,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
                           type="button"
                           className="table-action-btn"
                           onClick={() => handleOpenEditModal(user)}
-                          title="Edit User"
+                          title="Edit User / Reset PIN"
                         >
                           <Edit2 size={14} />
                         </button>
@@ -635,14 +746,18 @@ export const UsersManager: FC<UsersManagerProps> = ({
                 />
               </div>
 
-              {/* PIN with Random button */}
+              {/* PIN with CSPRNG Random button */}
               <div className="form-group">
                 <div className="flex items-center justify-between">
-                  <label>Access PIN (4-digit)</label>
+                  <label>
+                    {editingUser
+                      ? 'Reset Access PIN (leave blank to keep current)'
+                      : 'Access PIN (4–6 numeric digits)'}
+                  </label>
                   <button
                     type="button"
                     className="text-xs text-emerald-400 hover:underline flex items-center gap-1"
-                    onClick={() => setFormPin(generateRandomPin())}
+                    onClick={() => setFormPin(generateSecurePin())}
                   >
                     <Sparkles size={11} />
                     Random PIN
@@ -650,11 +765,12 @@ export const UsersManager: FC<UsersManagerProps> = ({
                 </div>
                 <input
                   type="text"
+                  inputMode="numeric"
                   maxLength={6}
-                  required
-                  placeholder="1234"
+                  required={!editingUser}
+                  placeholder={editingUser ? 'Leave blank to keep unchanged' : 'e.g. 4829'}
                   value={formPin}
-                  onChange={(e) => setFormPin(e.target.value)}
+                  onChange={(e) => setFormPin(e.target.value.replace(/\D/g, ''))}
                   className="font-mono text-center tracking-widest text-base font-bold text-emerald-400"
                 />
               </div>
@@ -697,7 +813,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
                     )}
                   </select>
                   <span className="text-[11px] text-slate-400 mt-1">
-                    Enables parent to live-track their child's specific assigned bus.
+                    Enables parent to live-track their child&apos;s specific assigned bus.
                   </span>
                 </div>
               )}

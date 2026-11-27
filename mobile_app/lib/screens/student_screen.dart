@@ -5,45 +5,54 @@ import 'package:latlong2/latlong.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../models/user_session.dart';
 import '../services/student_boarding_service.dart';
 
 class StudentScreen extends StatefulWidget {
-  const StudentScreen({super.key});
+  final UserSession session;
+
+  const StudentScreen({super.key, required this.session});
 
   @override
   State<StudentScreen> createState() => _StudentScreenState();
 }
 
 class _StudentScreenState extends State<StudentScreen> {
-  final StudentBoardingService _boardingService = StudentBoardingService();
+  late final StudentBoardingService _boardingService;
   final MapController _mapController = MapController();
   final MobileScannerController _scannerController = MobileScannerController();
 
-  static const String studentId = 'student_01';
-  static const String studentName = 'Rishikesh';
-  static const String rollNumber = '24AIE001';
-  final bool _feePaid = true; // default true as per data schema
-
-  BusLocationData _busLocation = BusLocationData.initial();
+  late BusLocationData _busLocation;
   StreamSubscription<BusLocationData>? _busLocationSub;
 
   int _selectedTab = 0; // 0: Scan Bus QR, 1: My ID Pass
-  bool _bypassGps = true; // default true for desk testing
+  bool _bypassGps = false; // Enforce 50m GPS proximity by default in production
   bool _isProcessingScan = false;
-  bool _isSatellite = false; // Street vs Satellite toggle
+  bool _isSatellite = false;
+  bool _isMapReady = false;
   BoardingResult? _boardingResult;
+
+  String get _studentId => widget.session.loginId;
+  String get _studentName => widget.session.fullName;
+  String get _assignedBusId => widget.session.assignedBusId;
+  bool get _feePaid => widget.session.feePaid;
 
   @override
   void initState() {
     super.initState();
+    _boardingService = StudentBoardingService(session: widget.session);
     _busLocation = _boardingService.currentBusLocation;
     _busLocationSub = _boardingService.busLocationStream.listen((loc) {
       if (mounted) {
         setState(() {
           _busLocation = loc;
         });
-        _mapController.move(
-            LatLng(loc.lat, loc.lng), _mapController.camera.zoom);
+        if (_isMapReady) {
+          _mapController.move(
+            LatLng(loc.lat, loc.lng),
+            _mapController.camera.zoom,
+          );
+        }
       }
     });
   }
@@ -64,24 +73,25 @@ class _StudentScreenState extends State<StudentScreen> {
   }
 
   Future<void> _handleBarcodeDetected(BarcodeCapture capture) async {
-    if (_isProcessingScan) return;
+    if (_isProcessingScan || _selectedTab != 0) return;
 
     final List<Barcode> barcodes = capture.barcodes;
     for (final barcode in barcodes) {
       final String? rawVal = barcode.rawValue;
-      if (rawVal != null && rawVal.isNotEmpty && rawVal.startsWith('BUS_')) {
+      if (rawVal != null && rawVal.isNotEmpty && rawVal.contains('|')) {
         setState(() {
           _isProcessingScan = true;
         });
 
         final result = await _boardingService.verifyAndBoard(
           rawVal,
-          studentId,
-          studentName,
           bypassGpsCheck: _bypassGps,
         );
 
         if (mounted) {
+          if (result.isSuccess) {
+            await _scannerController.stop();
+          }
           setState(() {
             _boardingResult = result;
             _isProcessingScan = false;
@@ -92,11 +102,14 @@ class _StudentScreenState extends State<StudentScreen> {
     }
   }
 
-  void _resetScanner() {
+  Future<void> _resetScanner() async {
     setState(() {
       _boardingResult = null;
       _isProcessingScan = false;
     });
+    try {
+      await _scannerController.start();
+    } catch (_) {}
   }
 
   @override
@@ -123,7 +136,8 @@ class _StudentScreenState extends State<StudentScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    studentName,
+                    _studentName,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       fontWeight: FontWeight.bold,
                       fontSize: 16,
@@ -131,7 +145,8 @@ class _StudentScreenState extends State<StudentScreen> {
                     ),
                   ),
                   Text(
-                    'Transit Pass • Bus BUS_01',
+                    'Transit Pass • Bus $_assignedBusId',
+                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 11,
                       color: Colors.grey.shade600,
@@ -140,7 +155,7 @@ class _StudentScreenState extends State<StudentScreen> {
                 ],
               ),
             ),
-            // Roll ID Pill
+            const SizedBox(width: 8),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
@@ -148,9 +163,9 @@ class _StudentScreenState extends State<StudentScreen> {
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(color: const Color(0xFFE2E8F0)),
               ),
-              child: const Text(
-                rollNumber,
-                style: TextStyle(
+              child: Text(
+                _studentId,
+                style: const TextStyle(
                   fontSize: 12,
                   fontFamily: 'monospace',
                   fontWeight: FontWeight.bold,
@@ -175,7 +190,6 @@ class _StudentScreenState extends State<StudentScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // Slim amber banner only if feePaid == false
             if (!_feePaid)
               Container(
                 width: double.infinity,
@@ -187,8 +201,8 @@ class _StudentScreenState extends State<StudentScreen> {
                     bottom: BorderSide(color: Color(0xFFFDE68A)),
                   ),
                 ),
-                child: Row(
-                  children: const [
+                child: const Row(
+                  children: [
                     Icon(Icons.warning_amber_rounded,
                         size: 16, color: Color(0xFFB45309)),
                     SizedBox(width: 8),
@@ -212,7 +226,7 @@ class _StudentScreenState extends State<StudentScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Top Map Card (height: 260, rounded 16px)
+                    // Live Bus Map Card
                     Container(
                       height: 260,
                       decoration: BoxDecoration(
@@ -235,9 +249,12 @@ class _StudentScreenState extends State<StudentScreen> {
                             FlutterMap(
                               mapController: _mapController,
                               options: MapOptions(
-                                initialCenter: LatLng(
-                                    _busLocation.lat, _busLocation.lng),
+                                initialCenter:
+                                    LatLng(_busLocation.lat, _busLocation.lng),
                                 initialZoom: 15.0,
+                                onMapReady: () {
+                                  _isMapReady = true;
+                                },
                               ),
                               children: [
                                 TileLayer(
@@ -249,8 +266,8 @@ class _StudentScreenState extends State<StudentScreen> {
                                 MarkerLayer(
                                   markers: [
                                     Marker(
-                                      point: LatLng(_busLocation.lat,
-                                          _busLocation.lng),
+                                      point: LatLng(
+                                          _busLocation.lat, _busLocation.lng),
                                       width: 48,
                                       height: 48,
                                       child: _buildBusMarker(),
@@ -260,7 +277,7 @@ class _StudentScreenState extends State<StudentScreen> {
                               ],
                             ),
 
-                            // Floating live speed & status pill (top-left)
+                            // Speed & status pill
                             Positioned(
                               top: 10,
                               left: 10,
@@ -294,7 +311,7 @@ class _StudentScreenState extends State<StudentScreen> {
                                     ),
                                     const SizedBox(width: 6),
                                     Text(
-                                      'BUS_01 • ${_busLocation.speed.toStringAsFixed(0)} km/h',
+                                      '$_assignedBusId • ${_busLocation.speed.toStringAsFixed(0)} km/h',
                                       style: const TextStyle(
                                         fontSize: 11,
                                         fontWeight: FontWeight.bold,
@@ -306,7 +323,7 @@ class _StudentScreenState extends State<StudentScreen> {
                               ),
                             ),
 
-                            // Floating top-right Street / Satellite chip
+                            // Street / Satellite chip
                             Positioned(
                               top: 10,
                               right: 10,
@@ -359,7 +376,7 @@ class _StudentScreenState extends State<StudentScreen> {
                               ),
                             ),
 
-                            // Floating bottom-right Google Maps ↗ button
+                            // Google Maps button
                             Positioned(
                               bottom: 10,
                               right: 10,
@@ -381,18 +398,13 @@ class _StudentScreenState extends State<StudentScreen> {
                                       ),
                                     ],
                                   ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: const [
-                                      Text(
-                                        'Google Maps ↗',
-                                        style: TextStyle(
-                                          fontSize: 11,
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.white,
-                                        ),
-                                      ),
-                                    ],
+                                  child: const Text(
+                                    'Google Maps ↗',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    ),
                                   ),
                                 ),
                               ),
@@ -403,7 +415,7 @@ class _StudentScreenState extends State<StudentScreen> {
                     ),
                     const SizedBox(height: 16),
 
-                    // Bottom Boarding Card: Clean 2-tab switcher
+                    // Bottom Boarding Card
                     Container(
                       padding: const EdgeInsets.all(18.0),
                       decoration: BoxDecoration(
@@ -421,7 +433,6 @@ class _StudentScreenState extends State<StudentScreen> {
                       ),
                       child: Column(
                         children: [
-                          // Tab selector
                           Container(
                             padding: const EdgeInsets.all(4),
                             decoration: BoxDecoration(
@@ -435,8 +446,12 @@ class _StudentScreenState extends State<StudentScreen> {
                                     title: 'Scan Bus QR',
                                     icon: Icons.qr_code_scanner_rounded,
                                     isSelected: _selectedTab == 0,
-                                    onTap: () =>
-                                        setState(() => _selectedTab = 0),
+                                    onTap: () {
+                                      setState(() => _selectedTab = 0);
+                                      if (_boardingResult?.isSuccess != true) {
+                                        _scannerController.start();
+                                      }
+                                    },
                                   ),
                                 ),
                                 Expanded(
@@ -444,16 +459,16 @@ class _StudentScreenState extends State<StudentScreen> {
                                     title: 'My ID Pass',
                                     icon: Icons.badge_rounded,
                                     isSelected: _selectedTab == 1,
-                                    onTap: () =>
-                                        setState(() => _selectedTab = 1),
+                                    onTap: () {
+                                      setState(() => _selectedTab = 1);
+                                      _scannerController.stop();
+                                    },
                                   ),
                                 ),
                               ],
                             ),
                           ),
                           const SizedBox(height: 16),
-
-                          // Tab Content
                           _selectedTab == 0
                               ? _buildScanQrTab()
                               : _buildMyIdPassTab(),
@@ -550,7 +565,6 @@ class _StudentScreenState extends State<StudentScreen> {
 
     return Column(
       children: [
-        // Camera Preview Frame (height: 240, rounded 16px)
         Container(
           height: 240,
           width: double.infinity,
@@ -568,7 +582,6 @@ class _StudentScreenState extends State<StudentScreen> {
                   controller: _scannerController,
                   onDetect: _handleBarcodeDetected,
                 ),
-                // Corner scan frame overlay
                 Center(
                   child: Container(
                     width: 160,
@@ -615,7 +628,7 @@ class _StudentScreenState extends State<StudentScreen> {
         ),
         const SizedBox(height: 12),
 
-        // Compact Bypass 50m GPS debug switch
+        // 50m GPS proximity switch (defaults OFF in production)
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
           decoration: BoxDecoration(
@@ -626,12 +639,12 @@ class _StudentScreenState extends State<StudentScreen> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Row(
-                children: const [
+              const Row(
+                children: [
                   Icon(Icons.gps_fixed, size: 15, color: Color(0xFF64748B)),
                   SizedBox(width: 6),
                   Text(
-                    'Bypass 50m GPS (Desk Testing)',
+                    'Bypass 50m GPS (Indoor Test)',
                     style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w600,
@@ -729,13 +742,13 @@ class _StudentScreenState extends State<StudentScreen> {
           ),
           const SizedBox(height: 2),
           const Text(
-            'Attendance logged to AppSync cloud ledger',
+            'Attendance logged via server verification',
             style: TextStyle(fontSize: 11, color: Color(0xFF047857)),
           ),
           const Divider(height: 20),
-          _buildPassRow('Student', '$studentName ($rollNumber)'),
+          _buildPassRow('Student', '$_studentName ($_studentId)'),
           const SizedBox(height: 6),
-          _buildPassRow('Bus Assigned', result.busId ?? 'BUS_01'),
+          _buildPassRow('Bus Assigned', result.busId ?? _assignedBusId),
           const SizedBox(height: 6),
           _buildPassRow('Trip ID', result.tripId ?? 'Active'),
           const SizedBox(height: 6),
@@ -775,12 +788,15 @@ class _StudentScreenState extends State<StudentScreen> {
           label,
           style: const TextStyle(fontSize: 11, color: Color(0xFF64748B)),
         ),
-        Text(
-          value,
-          style: const TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.bold,
-            color: Color(0xFF0F172A),
+        Flexible(
+          child: Text(
+            value,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF0F172A),
+            ),
           ),
         ),
       ],
@@ -788,11 +804,10 @@ class _StudentScreenState extends State<StudentScreen> {
   }
 
   Widget _buildMyIdPassTab() {
-    const String fallbackQrData = '$studentId|$rollNumber';
+    final String fallbackQrData = '$_studentId|$_assignedBusId';
 
     return Column(
       children: [
-        // Centered static QrImageView (180x180)
         Container(
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
@@ -807,10 +822,8 @@ class _StudentScreenState extends State<StudentScreen> {
           ),
         ),
         const SizedBox(height: 14),
-
-        // Student name and ID clearly formatted below
         Text(
-          studentName,
+          _studentName,
           style: const TextStyle(
             fontSize: 16,
             fontWeight: FontWeight.bold,
@@ -819,7 +832,7 @@ class _StudentScreenState extends State<StudentScreen> {
         ),
         const SizedBox(height: 2),
         Text(
-          'Roll: $rollNumber • B.Tech AI',
+          'ID: $_studentId • Bus $_assignedBusId',
           style: const TextStyle(
             fontSize: 12,
             color: Color(0xFF64748B),
@@ -829,16 +842,24 @@ class _StudentScreenState extends State<StudentScreen> {
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
           decoration: BoxDecoration(
-            color: const Color(0xFFECFDF5),
+            color: _feePaid
+                ? const Color(0xFFECFDF5)
+                : const Color(0xFFFEF2F2),
             borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: const Color(0xFFA7F3D0)),
+            border: Border.all(
+              color: _feePaid
+                  ? const Color(0xFFA7F3D0)
+                  : const Color(0xFFFECACA),
+            ),
           ),
-          child: const Text(
-            'FEE STATUS: VERIFIED',
+          child: Text(
+            _feePaid ? 'FEE STATUS: VERIFIED' : 'FEE STATUS: PENDING',
             style: TextStyle(
               fontSize: 10,
               fontWeight: FontWeight.bold,
-              color: Color(0xFF065F46),
+              color: _feePaid
+                  ? const Color(0xFF065F46)
+                  : const Color(0xFF991B1B),
               letterSpacing: 0.5,
             ),
           ),

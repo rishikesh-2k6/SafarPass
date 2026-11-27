@@ -6,11 +6,17 @@ import 'package:amplify_flutter/amplify_flutter.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
+import '../models/user_session.dart';
+import 'auth_session_service.dart';
 
 class DriverTelemetryService {
-  static const String busId = 'BUS_01';
-  static const String driverId = 'driver_01';
-  static const String qrSecret = 'SECRET_KEY_BUS_01_2026';
+  final UserSession session;
+
+  String get busId => session.assignedBusId;
+  String get driverId => session.loginId;
+  String get _qrSecret => session.qrSecret ?? '';
+
+  DriverTelemetryService({required this.session});
 
   static const List<Map<String, double>> simulatedCampusCoordinates = [
     {'lat': 16.4632, 'lng': 80.5064, 'speed': 20.0, 'heading': 45.0},
@@ -50,7 +56,7 @@ class DriverTelemetryService {
     } else {
       _simulatedTimer?.cancel();
       _simulatedTimer = null;
-      _startGpsStream();
+      _enableLiveGpsSafe();
     }
   }
 
@@ -60,6 +66,7 @@ class DriverTelemetryService {
   StreamSubscription<Position>? _positionSubscription;
   StreamSubscription<GraphQLResponse<String>>? _subscription;
   DateTime? _lastGpsMutationTime;
+  bool _isDisposed = false;
 
   final StreamController<String> _qrStreamController =
       StreamController<String>.broadcast();
@@ -96,135 +103,104 @@ class DriverTelemetryService {
     }
   }
 
+  Future<void> _enableLiveGpsSafe() async {
+    try {
+      await ensureLocationPermission();
+      if (!_isDisposed && isTripActive && !_simulateMovement) {
+        _startGpsStream();
+      }
+    } catch (e) {
+      if (!_isDisposed) {
+        gpsStatus.value = 'GPS Unavailable: $e';
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>?> _invokeDriverTripAction({
+    required String action,
+    String? tripId,
+    double? lat,
+    double? lng,
+    double? speed,
+    double? heading,
+  }) async {
+    const String mutation = r'''
+      mutation DriverTripAction(
+        $sessionToken: String!
+        $action: String!
+        $tripId: String
+        $lat: Float
+        $lng: Float
+        $speed: Float
+        $heading: Float
+      ) {
+        driverTripAction(
+          sessionToken: $sessionToken
+          action: $action
+          tripId: $tripId
+          lat: $lat
+          lng: $lng
+          speed: $speed
+          heading: $heading
+        )
+      }
+    ''';
+
+    final request = GraphQLRequest<String>(
+      document: mutation,
+      variables: {
+        'sessionToken': session.sessionToken,
+        'action': action,
+        'tripId': ?tripId,
+        'lat': ?lat,
+        'lng': ?lng,
+        'speed': ?speed,
+        'heading': ?heading,
+      },
+      authorizationMode: APIAuthorizationType.apiKey,
+    );
+
+    final response = await Amplify.API.mutate(request: request).response;
+    if (response.errors.isNotEmpty) {
+      throw response.errors.first.message;
+    }
+    if (response.data == null) return null;
+
+    final Map<String, dynamic>? outer =
+        jsonDecode(response.data!) as Map<String, dynamic>?;
+    return decodeAwsJsonPayload(outer?['driverTripAction']);
+  }
+
   Future<void> startTrip() async {
+    if (_qrSecret.isEmpty) {
+      throw 'Missing Bus QR signing secret for $busId. Contact fleet admin.';
+    }
+
     if (!_simulateMovement) {
       await ensureLocationPermission();
     }
 
-    final String startedAt = DateTime.now().toUtc().toIso8601String();
+    final Map<String, dynamic>? result = await _invokeDriverTripAction(
+      action: 'start',
+      lat: currentLat,
+      lng: currentLng,
+    );
 
-    const String createTripMutation = r'''
-      mutation CreateTrip($input: CreateTripInput!) {
-        createTrip(input: $input) {
-          id
-          busId
-          driverId
-          status
-          startedAt
-        }
-      }
-    ''';
-
-    try {
-      final tripRequest = GraphQLRequest<String>(
-        document: createTripMutation,
-        variables: {
-          'input': {
-            'busId': busId,
-            'driverId': driverId,
-            'status': 'active',
-            'startedAt': startedAt,
-          }
-        },
-      );
-
-      final tripResponse =
-          await Amplify.API.mutate(request: tripRequest).response;
-
-      if (tripResponse.data != null) {
-        final Map<String, dynamic> data =
-            jsonDecode(tripResponse.data!) as Map<String, dynamic>;
-        final Map<String, dynamic>? trip =
-            data['createTrip'] as Map<String, dynamic>?;
-        if (trip != null && trip['id'] != null) {
-          activeTripId = trip['id'] as String;
-        }
-      }
-    } catch (e) {
-      safePrint('Error creating trip: $e');
+    if (result == null || result['success'] != true) {
+      throw result?['message'] as String? ?? 'Failed to initialize trip on server.';
     }
 
-    activeTripId ??= 'TRIP_${DateTime.now().millisecondsSinceEpoch}';
-
-    const String createBusLocationMutation = r'''
-      mutation CreateBusLocation($input: CreateBusLocationInput!) {
-        createBusLocation(input: $input) {
-          busId
-          tripId
-          lat
-          lng
-          speed
-          heading
-          boardedCount
-        }
-      }
-    ''';
-
-    const String updateBusLocationMutation = r'''
-      mutation UpdateBusLocation($input: UpdateBusLocationInput!) {
-        updateBusLocation(input: $input) {
-          busId
-          tripId
-          lat
-          lng
-          speed
-          heading
-          boardedCount
-        }
-      }
-    ''';
-
-    bool locationCreated = false;
-    try {
-      final createLocRequest = GraphQLRequest<String>(
-        document: createBusLocationMutation,
-        variables: {
-          'input': {
-            'busId': busId,
-            'tripId': activeTripId,
-            'lat': 16.4632,
-            'lng': 80.5064,
-            'speed': 0.0,
-            'heading': 0.0,
-            'boardedCount': 0,
-          }
-        },
-      );
-      final locResponse =
-          await Amplify.API.mutate(request: createLocRequest).response;
-      if (locResponse.errors.isEmpty && locResponse.data != null) {
-        locationCreated = true;
-      }
-    } catch (e) {
-      safePrint('createBusLocation failed, will try updateBusLocation: $e');
-    }
-
-    if (!locationCreated) {
-      try {
-        final updateLocRequest = GraphQLRequest<String>(
-          document: updateBusLocationMutation,
-          variables: {
-            'input': {
-              'busId': busId,
-              'tripId': activeTripId,
-              'lat': 16.4632,
-              'lng': 80.5064,
-              'speed': 0.0,
-              'heading': 0.0,
-              'boardedCount': 0,
-            }
-          },
-        );
-        await Amplify.API.mutate(request: updateLocRequest).response;
-      } catch (e) {
-        safePrint('Error updating initial bus location: $e');
-      }
+    activeTripId = result['tripId'] as String?;
+    if (activeTripId == null || activeTripId!.isEmpty) {
+      throw 'Server did not return an active tripId.';
     }
 
     isTripActive = true;
-    boardedCount = 0;
-    _boardedCountStreamController.add(boardedCount);
-    _tripStateStreamController.add(true);
+    boardedCount = (result['boardedCount'] as num?)?.toInt() ?? 0;
+    if (!_isDisposed) {
+      _boardedCountStreamController.add(boardedCount);
+      _tripStateStreamController.add(true);
+    }
     onTripStateChanged?.call(true);
 
     _generateRotatingQr();
@@ -275,7 +251,9 @@ class DriverTelemetryService {
         currentLng = pos.longitude;
         currentSpeed = (pos.speed * 3.6).clamp(0.0, 120.0);
         currentHeading = pos.heading;
-        gpsStatus.value = 'Live GPS (±${pos.accuracy.toStringAsFixed(0)}m)';
+        if (!_isDisposed) {
+          gpsStatus.value = 'Live GPS (±${pos.accuracy.toStringAsFixed(0)}m)';
+        }
 
         final DateTime now = DateTime.now();
         if (_lastGpsMutationTime == null ||
@@ -290,7 +268,9 @@ class DriverTelemetryService {
         }
       },
       onError: (err) {
-        gpsStatus.value = 'GPS Error: $err';
+        if (!_isDisposed) {
+          gpsStatus.value = 'GPS Error: $err';
+        }
         safePrint('getPositionStream error: $err');
       },
     );
@@ -306,7 +286,9 @@ class DriverTelemetryService {
       currentLng = coord['lng']!;
       currentSpeed = coord['speed']!;
       currentHeading = coord['heading']!;
-      gpsStatus.value = 'Simulated Campus Loop';
+      if (!_isDisposed) {
+        gpsStatus.value = 'Simulated Campus Loop';
+      }
       await _sendBusLocationMutation(
         currentLat,
         currentLng,
@@ -324,50 +306,57 @@ class DriverTelemetryService {
   ) async {
     if (!isTripActive || activeTripId == null) return;
 
-    const String updateBusLocationMutation = r'''
-      mutation UpdateBusLocation($input: UpdateBusLocationInput!) {
-        updateBusLocation(input: $input) {
-          busId
-          tripId
-          lat
-          lng
-          speed
-          heading
-          boardedCount
-        }
-      }
-    ''';
-
     try {
-      final updateReq = GraphQLRequest<String>(
-        document: updateBusLocationMutation,
-        variables: {
-          'input': {
-            'busId': busId,
-            'tripId': activeTripId,
-            'lat': lat,
-            'lng': lng,
-            'speed': speed,
-            'heading': heading,
-          }
-        },
+      final Map<String, dynamic>? result = await _invokeDriverTripAction(
+        action: 'location',
+        tripId: activeTripId,
+        lat: lat,
+        lng: lng,
+        speed: speed,
+        heading: heading,
       );
-      await Amplify.API.mutate(request: updateReq).response;
+
+      if (result == null) return;
+
+      // Sync if Admin forcibly ended this trip from the Web Console
+      if (result['tripStatus'] == 'completed') {
+        _stopLocalTimers();
+        isTripActive = false;
+        activeTripId = null;
+        currentQrPayload = '';
+        if (!_isDisposed) {
+          gpsStatus.value = 'Ended by Dispatch';
+          _tripStateStreamController.add(false);
+        }
+        onTripStateChanged?.call(false);
+        return;
+      }
+
+      final int? serverCount = (result['boardedCount'] as num?)?.toInt();
+      if (serverCount != null && serverCount != boardedCount) {
+        boardedCount = serverCount;
+        if (!_isDisposed) {
+          _boardedCountStreamController.add(boardedCount);
+        }
+        onBoardedCountChanged?.call(boardedCount);
+      }
     } catch (e) {
-      safePrint('Error executing telemetry updateBusLocation: $e');
+      safePrint('Error executing telemetry location update: $e');
     }
   }
 
   String _generateRotatingQr() {
-    if (activeTripId == null) return '';
+    if (activeTripId == null || _qrSecret.isEmpty) return '';
     final int epochSeconds = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final String rawData = '$busId|$activeTripId|$epochSeconds';
-    final hmac = Hmac(sha256, utf8.encode(qrSecret));
+    final hmac = Hmac(sha256, utf8.encode(_qrSecret));
     final Digest digest = hmac.convert(utf8.encode(rawData));
     final String payload = '$rawData|$digest';
 
     currentQrPayload = payload;
-    _qrStreamController.add(payload);
+    if (!_isDisposed) {
+      _qrStreamController.add(payload);
+    }
     onQrPayloadChanged?.call(payload);
     return payload;
   }
@@ -392,6 +381,7 @@ class DriverTelemetryService {
     try {
       final subRequest = GraphQLRequest<String>(
         document: onUpdateBusLocationSubscription,
+        authorizationMode: APIAuthorizationType.apiKey,
       );
       final Stream<GraphQLResponse<String>> operation = Amplify.API.subscribe(
         subRequest,
@@ -407,10 +397,12 @@ class DriverTelemetryService {
               final Map<String, dynamic>? loc =
                   map['onUpdateBusLocation'] as Map<String, dynamic>?;
               if (loc != null && loc['busId'] == busId) {
-                final int? newCount = loc['boardedCount'] as int?;
+                final int? newCount = (loc['boardedCount'] as num?)?.toInt();
                 if (newCount != null && newCount != boardedCount) {
                   boardedCount = newCount;
-                  _boardedCountStreamController.add(boardedCount);
+                  if (!_isDisposed) {
+                    _boardedCountStreamController.add(boardedCount);
+                  }
                   onBoardedCountChanged?.call(boardedCount);
                 }
               }
@@ -428,34 +420,16 @@ class DriverTelemetryService {
 
   Future<void> triggerSos() async {
     if (activeTripId == null) return;
-
-    const String updateTripStatusMutation = r'''
-      mutation UpdateTripStatus($input: UpdateTripInput!) {
-        updateTrip(input: $input) {
-          id
-          status
-        }
-      }
-    ''';
-
-    try {
-      final request = GraphQLRequest<String>(
-        document: updateTripStatusMutation,
-        variables: {
-          'input': {
-            'id': activeTripId,
-            'status': 'sos',
-          }
-        },
-      );
-      await Amplify.API.mutate(request: request).response;
-      safePrint('Trip status updated to sos for $activeTripId');
-    } catch (e) {
-      safePrint('Error triggering SOS: $e');
+    final Map<String, dynamic>? res = await _invokeDriverTripAction(
+      action: 'sos',
+      tripId: activeTripId,
+    );
+    if (res != null && res['success'] != true) {
+      throw res['message'] as String? ?? 'Failed to trigger SOS.';
     }
   }
 
-  Future<void> endTrip() async {
+  void _stopLocalTimers() {
     _positionSubscription?.cancel();
     _positionSubscription = null;
     _simulatedTimer?.cancel();
@@ -464,30 +438,20 @@ class DriverTelemetryService {
     _qrTimer = null;
     _subscription?.cancel();
     _subscription = null;
-    gpsStatus.value = 'Trip Concluded';
+  }
+
+  Future<void> endTrip() async {
+    _stopLocalTimers();
+    if (!_isDisposed) {
+      gpsStatus.value = 'Trip Concluded';
+    }
 
     if (activeTripId != null) {
-      const String updateTripStatusMutation = r'''
-        mutation UpdateTripStatus($input: UpdateTripInput!) {
-          updateTrip(input: $input) {
-            id
-            status
-          }
-        }
-      ''';
-
       try {
-        final request = GraphQLRequest<String>(
-          document: updateTripStatusMutation,
-          variables: {
-            'input': {
-              'id': activeTripId,
-              'status': 'completed',
-            }
-          },
+        await _invokeDriverTripAction(
+          action: 'end',
+          tripId: activeTripId,
         );
-        await Amplify.API.mutate(request: request).response;
-        safePrint('Trip status updated to completed for $activeTripId');
       } catch (e) {
         safePrint('Error completing trip: $e');
       }
@@ -496,15 +460,16 @@ class DriverTelemetryService {
 
     isTripActive = false;
     currentQrPayload = '';
-    _tripStateStreamController.add(false);
+    if (!_isDisposed) {
+      _tripStateStreamController.add(false);
+    }
     onTripStateChanged?.call(false);
   }
 
   void dispose() {
-    _positionSubscription?.cancel();
-    _simulatedTimer?.cancel();
-    _qrTimer?.cancel();
-    _subscription?.cancel();
+    _isDisposed = true;
+    _stopLocalTimers();
+    gpsStatus.dispose();
     _qrStreamController.close();
     _boardedCountStreamController.close();
     _tripStateStreamController.close();

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, type FC } from 'react';
 import { generateClient } from 'aws-amplify/data';
 import type { Schema } from '../amplify/data/resource';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
@@ -16,13 +16,21 @@ import {
   CheckCircle,
   Navigation,
   Sparkles,
+  LogOut,
 } from 'lucide-react';
+import { AdminAuthGate } from './components/AdminAuthGate';
 import { ActiveTripsPanel } from './components/ActiveTripsPanel';
 import { BusesManager } from './components/BusesManager';
 import { UsersManager } from './components/UsersManager';
+import {
+  hashPin,
+  generateSecureId,
+  generateSecureQrSecret,
+  sanitizeCsvCell,
+} from './utils/crypto';
 import './App.css';
 
-const client = generateClient<Schema>();
+const client = generateClient<Schema>({ authMode: 'userPool' });
 
 type BusType = Schema['Bus']['type'];
 type BusLocationType = Schema['BusLocation']['type'];
@@ -38,7 +46,12 @@ const busMarkerIcon = new L.DivIcon({
   popupAnchor: [0, -22],
 });
 
-export default function App() {
+interface FleetPortalProps {
+  adminEmail: string;
+  onSignOut: () => Promise<void>;
+}
+
+const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
   const [activeTab, setActiveTab] = useState<'operations' | 'buses' | 'users'>('operations');
 
   // Real-time DynamoDB entities
@@ -52,16 +65,37 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [mapLayer, setMapLayer] = useState<'street' | 'satellite'>('street');
   const [globalToast, setGlobalToast] = useState<string | null>(null);
+  const [todayPrefix, setTodayPrefix] = useState<string>(() =>
+    new Date().toISOString().slice(0, 10),
+  );
+  const toastTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const id = window.setInterval(
+      () => setTodayPrefix(new Date().toISOString().slice(0, 10)),
+      60000,
+    );
+    return () => {
+      window.clearInterval(id);
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
 
   const showToast = (msg: string) => {
     setGlobalToast(msg);
-    setTimeout(() => setGlobalToast(null), 3500);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => setGlobalToast(null), 3500);
   };
 
-  // Real-time observeQuery subscriptions
+  // Real-time observeQuery subscriptions (authenticated as ADMINS)
   useEffect(() => {
     const subBus = client.models.Bus.observeQuery().subscribe({
-      next: ({ items }) => setBuses([...items]),
+      next: ({ items }) =>
+        setBuses([...items].sort((a, b) => a.busId.localeCompare(b.busId))),
       error: (err) => console.error('Bus observeQuery error', err),
     });
 
@@ -76,12 +110,23 @@ export default function App() {
     });
 
     const subAttendance = client.models.AttendanceLog.observeQuery().subscribe({
-      next: ({ items }) => setAttendanceLogs([...items]),
+      next: ({ items }) =>
+        setAttendanceLogs(
+          [...items].sort((a, b) =>
+            (b.scannedAt ?? '').localeCompare(a.scannedAt ?? ''),
+          ),
+        ),
       error: (err) => console.error('AttendanceLog observeQuery error', err),
     });
 
     const subUsers = client.models.UserProfile.observeQuery().subscribe({
-      next: ({ items }) => setUsers([...items]),
+      next: ({ items }) =>
+        setUsers(
+          [...items].sort(
+            (a, b) =>
+              a.role.localeCompare(b.role) || a.fullName.localeCompare(b.fullName),
+          ),
+        ),
       error: (err) => console.error('UserProfile observeQuery error', err),
     });
 
@@ -97,30 +142,45 @@ export default function App() {
   // Emergency SOS list
   const activeSosTrips = useMemo(() => {
     return trips.filter(
-      (trip) => trip.status === 'sos' && !resolvedSosIds.includes(trip.id)
+      (trip) => trip.status === 'sos' && !resolvedSosIds.includes(trip.id),
     );
   }, [trips, resolvedSosIds]);
 
   const handleResolveSos = async (tripId: string) => {
     try {
-      await client.models.Trip.update({
+      const { errors } = await client.models.Trip.update({
         id: tripId,
         status: 'active',
       });
+      if (errors?.length) {
+        throw new Error(errors.map((e) => e.message).join(', '));
+      }
+      setResolvedSosIds((prev) => [...prev, tripId]);
       showToast('SOS Alert marked as resolved');
     } catch (err) {
-      console.warn('Could not update trip in DynamoDB:', err);
+      console.error('Could not update trip in DynamoDB:', err);
+      alert('Failed to resolve SOS alert in DynamoDB. Please retry.');
     }
-    setResolvedSosIds((prev) => [...prev, tripId]);
   };
 
   // Force End Trip Action
   const handleForceEndTrip = async (tripId: string, busId: string) => {
     try {
-      await client.models.Trip.update({
+      const { errors } = await client.models.Trip.update({
         id: tripId,
         status: 'completed',
+        endedAt: new Date().toISOString(),
       });
+      if (errors?.length) {
+        throw new Error(errors.map((e) => e.message).join(', '));
+      }
+      const existingLoc = busLocations.find((l) => l.busId === busId);
+      if (existingLoc && existingLoc.tripId === tripId) {
+        await client.models.BusLocation.update({
+          busId,
+          speed: 0,
+        });
+      }
       showToast(`Trip for ${busId} has been forcibly ended.`);
     } catch (err) {
       console.error('Failed to end trip:', err);
@@ -135,12 +195,14 @@ export default function App() {
     capacity: number;
     qrSecret: string;
   }) => {
-    await client.models.Bus.create({
+    const { errors } = await client.models.Bus.create({
       busId: busData.busId,
       routeName: busData.routeName,
       capacity: busData.capacity,
       qrSecret: busData.qrSecret,
+      isActive: true,
     });
+    if (errors?.length) throw new Error(errors[0].message);
   };
 
   const handleUpdateBus = async (busData: {
@@ -148,28 +210,30 @@ export default function App() {
     routeName: string;
     capacity: number;
   }) => {
-    await client.models.Bus.update({
+    const { errors } = await client.models.Bus.update({
       busId: busData.busId,
       routeName: busData.routeName,
       capacity: busData.capacity,
     });
+    if (errors?.length) throw new Error(errors[0].message);
   };
 
   const handleRotateSecret = async (busId: string): Promise<string> => {
-    const rand = Math.random().toString(36).substring(2, 9).toUpperCase();
-    const newSecret = `SECRET_KEY_${busId}_${rand}_${Date.now()}`;
-    await client.models.Bus.update({
+    const newSecret = generateSecureQrSecret(busId);
+    const { errors } = await client.models.Bus.update({
       busId,
       qrSecret: newSecret,
     });
+    if (errors?.length) throw new Error(errors[0].message);
     return newSecret;
   };
 
   const handleDeleteBus = async (busId: string) => {
-    await client.models.Bus.delete({ busId });
+    const { errors } = await client.models.Bus.delete({ busId });
+    if (errors?.length) throw new Error(errors[0].message);
   };
 
-  // User Management CRUD Actions
+  // User Management CRUD Actions (hashing PINs client-side before transmission)
   const handleAddUser = async (userData: {
     loginId: string;
     pin: string;
@@ -179,47 +243,76 @@ export default function App() {
     parentOfStudentId?: string;
     feePaid?: boolean;
   }) => {
-    const userId = `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    await client.models.UserProfile.create({
+    const pinHash = await hashPin(userData.pin);
+    const userId = generateSecureId('usr');
+    const { errors } = await client.models.UserProfile.create({
       userId,
       loginId: userData.loginId,
-      pin: userData.pin,
+      pinHash,
       fullName: userData.fullName,
       role: userData.role,
       assignedBusId: userData.assignedBusId,
       parentOfStudentId: userData.parentOfStudentId,
       feePaid: userData.feePaid ?? true,
+      failedAttempts: 0,
+      lockedUntil: null,
     });
+    if (errors?.length) throw new Error(errors[0].message);
   };
 
   const handleUpdateUser = async (userData: {
     userId: string;
     loginId: string;
-    pin: string;
+    pin?: string;
     fullName: string;
     role: string;
     assignedBusId?: string;
     parentOfStudentId?: string;
     feePaid?: boolean;
+    unlock?: boolean;
   }) => {
-    await client.models.UserProfile.update({
+    const patch: {
+      userId: string;
+      loginId: string;
+      pinHash?: string;
+      fullName: string;
+      role: string;
+      assignedBusId?: string | null;
+      parentOfStudentId?: string | null;
+      feePaid: boolean;
+      failedAttempts?: number;
+      lockedUntil?: string | null;
+    } = {
       userId: userData.userId,
       loginId: userData.loginId,
-      pin: userData.pin,
       fullName: userData.fullName,
       role: userData.role,
-      assignedBusId: userData.assignedBusId,
-      parentOfStudentId: userData.parentOfStudentId,
+      assignedBusId: userData.assignedBusId ?? null,
+      parentOfStudentId: userData.parentOfStudentId ?? null,
       feePaid: userData.feePaid ?? true,
-    });
+    };
+
+    if (userData.pin) {
+      patch.pinHash = await hashPin(userData.pin);
+      patch.failedAttempts = 0;
+      patch.lockedUntil = null;
+    }
+    if (userData.unlock) {
+      patch.failedAttempts = 0;
+      patch.lockedUntil = null;
+    }
+
+    const { errors } = await client.models.UserProfile.update(patch);
+    if (errors?.length) throw new Error(errors[0].message);
   };
 
   const handleToggleFeePaid = async (userId: string, currentStatus: boolean) => {
     try {
-      await client.models.UserProfile.update({
+      const { errors } = await client.models.UserProfile.update({
         userId,
         feePaid: !currentStatus,
       });
+      if (errors?.length) throw new Error(errors[0].message);
       showToast(`Transit fee status updated to ${!currentStatus ? 'Paid' : 'Unpaid'}`);
     } catch (err) {
       console.error('Failed to toggle fee status:', err);
@@ -228,23 +321,23 @@ export default function App() {
   };
 
   const handleDeleteUser = async (userId: string) => {
-    await client.models.UserProfile.delete({ userId });
+    const { errors } = await client.models.UserProfile.delete({ userId });
+    if (errors?.length) throw new Error(errors[0].message);
   };
 
-  // Seed Sample Campus Data
+  // Seed Sample Campus Data with hashed PINs & cryptographic QR secret
   const handleSeedSampleData = async () => {
-    // 1. Ensure BUS_01 exists
     const hasBus01 = buses.some((b) => b.busId === 'BUS_01');
     if (!hasBus01) {
       await client.models.Bus.create({
         busId: 'BUS_01',
         routeName: 'Central Campus Express',
         capacity: 45,
-        qrSecret: 'SECRET_KEY_BUS_01_2026',
+        qrSecret: generateSecureQrSecret('BUS_01'),
+        isActive: true,
       });
     }
 
-    // 2. Sample Users: 1 Driver, 2 Students, 1 Parent
     const sampleUsers = [
       {
         loginId: 'driver_01',
@@ -284,9 +377,17 @@ export default function App() {
     for (const u of sampleUsers) {
       const exists = users.some((existing) => existing.loginId === u.loginId);
       if (!exists) {
+        const pinHash = await hashPin(u.pin);
         await client.models.UserProfile.create({
-          userId: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-          ...u,
+          userId: generateSecureId('usr'),
+          loginId: u.loginId,
+          pinHash,
+          fullName: u.fullName,
+          role: u.role,
+          assignedBusId: u.assignedBusId,
+          parentOfStudentId: u.parentOfStudentId,
+          feePaid: u.feePaid,
+          failedAttempts: 0,
         });
       }
     }
@@ -297,40 +398,42 @@ export default function App() {
     const activeFromTrips = new Set(
       trips
         .filter((t) => t.status === 'active' || t.status === 'sos')
-        .map((t) => t.busId)
+        .map((t) => t.busId),
     );
-    if (activeFromTrips.size > 0) return activeFromTrips.size;
-    return busLocations.length > 0 ? busLocations.length : 1;
-  }, [trips, busLocations]);
+    return activeFromTrips.size;
+  }, [trips]);
 
   const totalStudentsBoardedToday = useMemo(() => {
-    if (attendanceLogs.length > 0) return attendanceLogs.length;
-    return busLocations.reduce((sum, b) => sum + (b.boardedCount ?? 0), 0);
-  }, [attendanceLogs, busLocations]);
+    const todayLogs = attendanceLogs.filter((log) =>
+      (log.scannedAt ?? '').startsWith(todayPrefix),
+    );
+    return todayLogs.length;
+  }, [attendanceLogs, todayPrefix]);
 
   const activeSosCount = activeSosTrips.length;
 
   const fleetOccupancyPct = useMemo(() => {
     const totalCap = buses.reduce((acc, b) => acc + (b.capacity || 45), 0) || 45;
-    const pct = Math.round((totalStudentsBoardedToday / totalCap) * 100);
+    const activeBoarded = busLocations.reduce(
+      (sum, loc) => sum + (loc.boardedCount ?? 0),
+      0,
+    );
+    const pct = Math.round((activeBoarded / totalCap) * 100);
     return Math.min(pct, 100);
-  }, [buses, totalStudentsBoardedToday]);
+  }, [buses, busLocations]);
 
-  // Fallback demo map location if no GPS received yet
+  // Only render real tracked bus locations on map (no fake live bus marker)
   const displayLocations = useMemo(() => {
-    if (busLocations.length > 0) return busLocations;
-    return [
-      {
-        busId: 'BUS_01',
-        tripId: 'TRIP_DEMO_CAMPUS',
-        lat: 16.4632,
-        lng: 80.5064,
-        speed: 28,
-        heading: 90,
-        boardedCount: totalStudentsBoardedToday || 12,
-      } as BusLocationType,
-    ];
-  }, [busLocations, totalStudentsBoardedToday]);
+    const activeBusIds = new Set(
+      trips
+        .filter((t) => t.status === 'active' || t.status === 'sos')
+        .map((t) => t.busId),
+    );
+    if (activeBusIds.size > 0) {
+      return busLocations.filter((l) => activeBusIds.has(l.busId));
+    }
+    return busLocations;
+  }, [busLocations, trips]);
 
   // Filtered attendance records
   const filteredAttendanceLogs = useMemo(() => {
@@ -340,39 +443,49 @@ export default function App() {
       (log) =>
         (log.studentName && log.studentName.toLowerCase().includes(q)) ||
         (log.studentId && log.studentId.toLowerCase().includes(q)) ||
-        (log.busId && log.busId.toLowerCase().includes(q))
+        (log.busId && log.busId.toLowerCase().includes(q)),
     );
   }, [attendanceLogs, searchQuery]);
 
-  // Export CSV Handler
+  // Formula-safe RFC 4180 CSV Export Handler
   const handleExportCsv = () => {
     if (attendanceLogs.length === 0) {
       alert('No attendance data available to export.');
       return;
     }
-    const headers = ['Log ID', 'Trip ID', 'Bus ID', 'Student ID', 'Student Name', 'Scanned At', 'Latitude', 'Longitude'];
+    const headers = [
+      'Log ID',
+      'Trip ID',
+      'Bus ID',
+      'Student ID',
+      'Student Name',
+      'Scanned At',
+      'Latitude',
+      'Longitude',
+    ];
     const rows = attendanceLogs.map((log) => [
-      log.id,
-      log.tripId,
-      log.busId,
-      log.studentId,
-      `"${log.studentName || ''}"`,
-      log.scannedAt || '',
-      log.scanLat ?? '',
-      log.scanLng ?? '',
+      sanitizeCsvCell(log.id),
+      sanitizeCsvCell(log.tripId),
+      sanitizeCsvCell(log.busId),
+      sanitizeCsvCell(log.studentId),
+      sanitizeCsvCell(log.studentName || ''),
+      sanitizeCsvCell(log.scannedAt || ''),
+      sanitizeCsvCell(log.scanLat ?? ''),
+      sanitizeCsvCell(log.scanLng ?? ''),
     ]);
 
-    const csvContent =
-      'data:text/csv;charset=utf-8,' +
-      [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
-
-    const encodedUri = encodeURI(csvContent);
+    const csvText = [headers.map(sanitizeCsvCell).join(','), ...rows.map((r) => r.join(','))].join(
+      '\n',
+    );
+    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `VahanSync_Attendance_${new Date().toISOString().slice(0, 10)}.csv`);
+    link.href = url;
+    link.download = `VahanSync_Attendance_${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -402,6 +515,7 @@ export default function App() {
             </div>
           </div>
           <button
+            type="button"
             className="sos-resolve-btn"
             onClick={() => activeSosTrips.forEach((t) => handleResolveSos(t.id))}
           >
@@ -419,7 +533,7 @@ export default function App() {
           <div>
             <h1 className="brand-title">VahanSync Fleet Console</h1>
             <p className="brand-subtitle">
-              Campus Transit Operations, Fleet & User Governance
+              Campus Transit Operations, Fleet &amp; User Governance
             </p>
           </div>
         </div>
@@ -427,7 +541,7 @@ export default function App() {
         <div className="header-actions">
           <div className="live-sync-indicator">
             <Radio size={14} className="text-emerald-400 animate-pulse" />
-            <span>AppSync Real-Time Active</span>
+            <span>AppSync Secure ({adminEmail})</span>
           </div>
 
           {users.length === 0 && (
@@ -441,6 +555,16 @@ export default function App() {
               <span>Seed Demo Data</span>
             </button>
           )}
+
+          <button
+            type="button"
+            className="btn-secondary flex items-center gap-1.5 text-xs py-2 px-3"
+            onClick={onSignOut}
+            title="Sign out of Admin Console"
+          >
+            <LogOut size={14} />
+            <span>Sign Out</span>
+          </button>
         </div>
       </header>
 
@@ -474,7 +598,7 @@ export default function App() {
           onClick={() => setActiveTab('users')}
         >
           <Users size={16} className={activeTab === 'users' ? 'text-emerald-400' : ''} />
-          <span>Students & Staff</span>
+          <span>Students &amp; Staff</span>
           <span className="tab-count-badge">{users.length}</span>
         </button>
       </nav>
@@ -492,7 +616,7 @@ export default function App() {
                 </div>
               </div>
               <div className="kpi-value text-emerald-400">{totalActiveBuses}</div>
-              <div className="kpi-sub">Campus Route Coverage</div>
+              <div className="kpi-sub">Active Trips On Road</div>
             </div>
 
             <div className="kpi-card">
@@ -503,7 +627,7 @@ export default function App() {
                 </div>
               </div>
               <div className="kpi-value text-blue-400">{totalStudentsBoardedToday}</div>
-              <div className="kpi-sub">Verified via QR Telemetry</div>
+              <div className="kpi-sub">Verified via Server HMAC</div>
             </div>
 
             <div className="kpi-card">
@@ -539,7 +663,7 @@ export default function App() {
                 </div>
               </div>
               <div className="kpi-value text-purple-400">{fleetOccupancyPct}%</div>
-              <div className="kpi-sub">Capacity Utilization</div>
+              <div className="kpi-sub">Current Trip Utilization</div>
             </div>
           </section>
 
@@ -612,7 +736,7 @@ export default function App() {
                           </div>
                           <div className="popup-body">
                             <div>
-                              Speed: <strong>{bus.speed ?? 0} km/h</strong>
+                              Speed: <strong>{(bus.speed ?? 0).toFixed(1)} km/h</strong>
                             </div>
                             <div>
                               Boarded: <strong>{bus.boardedCount ?? 0} students</strong>
@@ -749,5 +873,13 @@ export default function App() {
         />
       )}
     </div>
+  );
+};
+
+export default function App() {
+  return (
+    <AdminAuthGate>
+      {({ email, signOut }) => <FleetPortal adminEmail={email} onSignOut={signOut} />}
+    </AdminAuthGate>
   );
 }

@@ -3,8 +3,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:amplify_api/amplify_api.dart';
 import 'package:amplify_flutter/amplify_flutter.dart';
-import 'package:crypto/crypto.dart';
 import 'package:geolocator/geolocator.dart';
+import '../models/user_session.dart';
+import 'auth_session_service.dart';
 
 class BusLocationData {
   final String busId;
@@ -48,7 +49,7 @@ class BusLocationData {
       lng: (json['lng'] as num?)?.toDouble() ?? 80.5064,
       speed: (json['speed'] as num?)?.toDouble() ?? 0.0,
       heading: (json['heading'] as num?)?.toDouble() ?? 0.0,
-      boardedCount: json['boardedCount'] as int? ?? 0,
+      boardedCount: (json['boardedCount'] as num?)?.toInt() ?? 0,
       updatedAt: DateTime.now(),
     );
   }
@@ -74,14 +75,41 @@ class BoardingResult {
   });
 }
 
+class ParentWardStatusData {
+  final bool success;
+  final String? message;
+  final String? wardName;
+  final String? wardLoginId;
+  final String? assignedBusId;
+  final bool feePaid;
+  final bool boarded;
+  final DateTime? boardedAt;
+  final String? boardedBusId;
+  final String activeTripStatus;
+  final String? activeDriverId;
+
+  const ParentWardStatusData({
+    required this.success,
+    this.message,
+    this.wardName,
+    this.wardLoginId,
+    this.assignedBusId,
+    this.feePaid = true,
+    this.boarded = false,
+    this.boardedAt,
+    this.boardedBusId,
+    this.activeTripStatus = 'idle',
+    this.activeDriverId,
+  });
+}
+
 class StudentBoardingService {
-  static const String targetBusId = 'BUS_01';
-  static const String qrSecret = 'SECRET_KEY_BUS_01_2026';
+  final UserSession session;
 
-  BusLocationData _currentBusLocation = BusLocationData.initial();
+  String get targetBusId => session.wardBusId ?? session.assignedBusId;
+
+  late BusLocationData _currentBusLocation;
   BusLocationData get currentBusLocation => _currentBusLocation;
-
-  final Set<String> _boardedTrips = <String>{};
 
   final StreamController<BusLocationData> _busLocationStreamController =
       StreamController<BusLocationData>.broadcast();
@@ -89,8 +117,10 @@ class StudentBoardingService {
       _busLocationStreamController.stream;
 
   StreamSubscription<GraphQLResponse<String>>? _locationSubscription;
+  bool _isDisposed = false;
 
-  StudentBoardingService() {
+  StudentBoardingService({required this.session}) {
+    _currentBusLocation = BusLocationData.initial(busId: targetBusId);
     initLiveLocation();
   }
 
@@ -138,10 +168,11 @@ class StudentBoardingService {
       final request = GraphQLRequest<String>(
         document: getBusLocationQuery,
         variables: {'busId': targetBusId},
+        authorizationMode: APIAuthorizationType.apiKey,
       );
       final response = await Amplify.API.query(request: request).response;
 
-      if (response.data != null) {
+      if (response.data != null && !_isDisposed) {
         final Map<String, dynamic> data =
             jsonDecode(response.data!) as Map<String, dynamic>;
         final Map<String, dynamic>? loc =
@@ -176,15 +207,17 @@ class StudentBoardingService {
     try {
       final request = GraphQLRequest<String>(
         document: onUpdateBusLocationSubscription,
+        authorizationMode: APIAuthorizationType.apiKey,
       );
       final Stream<GraphQLResponse<String>> operation = Amplify.API.subscribe(
         request,
-        onEstablished: () => safePrint('Student onUpdateBusLocation subscription active'),
+        onEstablished: () =>
+            safePrint('Student onUpdateBusLocation subscription active'),
       );
 
       _locationSubscription = operation.listen(
         (event) {
-          if (event.data != null) {
+          if (event.data != null && !_isDisposed) {
             try {
               final Map<String, dynamic> map =
                   jsonDecode(event.data!) as Map<String, dynamic>;
@@ -206,10 +239,11 @@ class StudentBoardingService {
     }
   }
 
+  /// Server-verified boarding via transit-gateway Lambda.
+  /// Student apps never possess Bus qrSecret; HMAC, expiry, fee status,
+  /// GPS proximity, and duplicate-boarding are enforced server-side.
   Future<BoardingResult> verifyAndBoard(
-    String rawQrPayload,
-    String studentId,
-    String studentName, {
+    String rawQrPayload, {
     bool bypassGpsCheck = false,
   }) async {
     final List<String> parts = rawQrPayload.trim().split('|');
@@ -220,48 +254,15 @@ class StudentBoardingService {
       );
     }
 
-    final String qrBusId = parts[0];
-    final String qrTripId = parts[1];
-    final String qrTimestampStr = parts[2];
-    final String qrSignature = parts[3];
-
-    // Check 1: Verify HMAC-SHA256 signature against 'SECRET_KEY_BUS_01_2026'
-    final String rawData = '$qrBusId|$qrTripId|$qrTimestampStr';
-    final hmac = Hmac(sha256, utf8.encode(qrSecret));
-    final String expectedSignature =
-        hmac.convert(utf8.encode(rawData)).toString();
-
-    if (qrSignature != expectedSignature) {
+    if (!session.feePaid) {
       return const BoardingResult(
         isSuccess: false,
-        message:
-            'Anti-Proxy Check Failed: Invalid QR Signature. QR code is counterfeit or tampered.',
+        message: 'Boarding Denied: Transit fee pending. Please clear dues.',
       );
     }
 
-    // Check 2: Verify now - timestamp <= 30 seconds
-    final int? qrTimestamp = int.tryParse(qrTimestampStr);
-    if (qrTimestamp == null) {
-      return const BoardingResult(
-        isSuccess: false,
-        message: 'Anti-Proxy Check Failed: Malformed QR timestamp.',
-      );
-    }
-
-    final int currentEpoch = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final int ageSeconds = currentEpoch - qrTimestamp;
-
-    if (ageSeconds > 30) {
-      return BoardingResult(
-        isSuccess: false,
-        message:
-            'Anti-Proxy Check Failed: QR Code Expired (${ageSeconds}s old > 30s limit). Screenshots/forwarded codes are invalid.',
-      );
-    }
-
-    // Check 3: Geolocator distance check <= 50 meters
-    double studentLat = _currentBusLocation.lat;
-    double studentLng = _currentBusLocation.lng;
+    double? studentLat;
+    double? studentLng;
 
     if (!bypassGpsCheck) {
       try {
@@ -277,134 +278,157 @@ class StudentBoardingService {
         final Position position = await Geolocator.getCurrentPosition(
           locationSettings: const LocationSettings(
             accuracy: LocationAccuracy.high,
-            timeLimit: Duration(seconds: 4),
+            timeLimit: Duration(seconds: 6),
           ),
         );
         studentLat = position.latitude;
         studentLng = position.longitude;
       } catch (e) {
-        safePrint('Error obtaining student location: $e');
-      }
-
-      final double distanceInMeters = Geolocator.distanceBetween(
-        studentLat,
-        studentLng,
-        _currentBusLocation.lat,
-        _currentBusLocation.lng,
-      );
-
-      if (distanceInMeters > 50.0) {
+        // Strict security: never fall back to bus coordinates on GPS failure
         return BoardingResult(
           isSuccess: false,
           message:
-              'Anti-Proxy Check Failed: Proximity violation. You are ${distanceInMeters.toStringAsFixed(1)}m from the bus (> 50m radius).',
+              'Location Error: Unable to acquire live GPS fix ($e). Enable GPS or desk testing.',
         );
       }
     }
 
-    // Check 4: Prevent duplicate boarding for the same tripId
-    final String tripKey = '$studentId:$qrTripId';
-    if (_boardedTrips.contains(tripKey)) {
+    const String verifyMutation = r'''
+      mutation VerifyStudentBoarding(
+        $sessionToken: String!
+        $qrPayload: String!
+        $scanLat: Float
+        $scanLng: Float
+        $bypassGpsCheck: Boolean
+      ) {
+        verifyStudentBoarding(
+          sessionToken: $sessionToken
+          qrPayload: $qrPayload
+          scanLat: $scanLat
+          scanLng: $scanLng
+          bypassGpsCheck: $bypassGpsCheck
+        )
+      }
+    ''';
+
+    try {
+      final request = GraphQLRequest<String>(
+        document: verifyMutation,
+        variables: {
+          'sessionToken': session.sessionToken,
+          'qrPayload': rawQrPayload.trim(),
+          'scanLat': ?studentLat,
+          'scanLng': ?studentLng,
+          'bypassGpsCheck': bypassGpsCheck,
+        },
+        authorizationMode: APIAuthorizationType.apiKey,
+      );
+
+      final response = await Amplify.API.mutate(request: request).response;
+      if (response.errors.isNotEmpty) {
+        return BoardingResult(
+          isSuccess: false,
+          message: response.errors.first.message,
+        );
+      }
+
+      final Map<String, dynamic>? outer = response.data != null
+          ? jsonDecode(response.data!) as Map<String, dynamic>?
+          : null;
+      final Map<String, dynamic>? payload =
+          decodeAwsJsonPayload(outer?['verifyStudentBoarding']);
+
+      if (payload == null) {
+        return const BoardingResult(
+          isSuccess: false,
+          message: 'No response from boarding verification server.',
+        );
+      }
+
+      if (payload['success'] != true) {
+        return BoardingResult(
+          isSuccess: false,
+          message: payload['message'] as String? ?? 'Boarding verification failed.',
+        );
+      }
+
+      final String? boardedAtStr = payload['boardedAt'] as String?;
       return BoardingResult(
+        isSuccess: true,
+        message: payload['message'] as String? ?? 'Boarding Verified!',
+        tripId: payload['tripId'] as String?,
+        busId: payload['busId'] as String?,
+        studentId: payload['studentId'] as String?,
+        studentName: payload['studentName'] as String?,
+        boardedAt: boardedAtStr != null
+            ? DateTime.tryParse(boardedAtStr) ?? DateTime.now()
+            : DateTime.now(),
+      );
+    } catch (e) {
+      safePrint('Error verifying boarding on server: $e');
+      return const BoardingResult(
         isSuccess: false,
-        message: 'Duplicate Boarding: Already boarded for Trip $qrTripId.',
+        message: 'Network error while verifying boarding. Please try again.',
       );
     }
+  }
 
-    // Mark boarded locally
-    _boardedTrips.add(tripKey);
-    final DateTime boardedAt = DateTime.now();
-
-    // Execute createAttendanceLog mutation
-    const String createAttendanceLogMutation = r'''
-      mutation CreateAttendanceLog($input: CreateAttendanceLogInput!) {
-        createAttendanceLog(input: $input) {
-          id
-          tripId
-          busId
-          studentId
-          studentName
-          scanLat
-          scanLng
-          scannedAt
-        }
+  Future<ParentWardStatusData> fetchParentWardStatus() async {
+    const String wardQuery = r'''
+      query GetParentWardStatus($sessionToken: String!) {
+        getParentWardStatus(sessionToken: $sessionToken)
       }
     ''';
 
     try {
-      final logRequest = GraphQLRequest<String>(
-        document: createAttendanceLogMutation,
-        variables: {
-          'input': {
-            'tripId': qrTripId,
-            'busId': qrBusId,
-            'studentId': studentId,
-            'studentName': studentName,
-            'scanLat': studentLat,
-            'scanLng': studentLng,
-            'scannedAt': boardedAt.toUtc().toIso8601String(),
-          }
-        },
+      final request = GraphQLRequest<String>(
+        document: wardQuery,
+        variables: {'sessionToken': session.sessionToken},
+        authorizationMode: APIAuthorizationType.apiKey,
       );
-      await Amplify.API.mutate(request: logRequest).response;
-    } catch (e) {
-      safePrint('Error creating attendance log: $e');
-    }
-
-    // Increment BusLocation.boardedCount via updateBusLocation
-    const String updateBusLocationMutation = r'''
-      mutation UpdateBusLocation($input: UpdateBusLocationInput!) {
-        updateBusLocation(input: $input) {
-          busId
-          tripId
-          lat
-          lng
-          speed
-          heading
-          boardedCount
-        }
+      final response = await Amplify.API.query(request: request).response;
+      if (response.errors.isNotEmpty || response.data == null) {
+        return const ParentWardStatusData(
+          success: false,
+          message: 'Unable to fetch ward transit status.',
+        );
       }
-    ''';
 
-    final int nextCount = _currentBusLocation.boardedCount + 1;
-    try {
-      final updateLocRequest = GraphQLRequest<String>(
-        document: updateBusLocationMutation,
-        variables: {
-          'input': {
-            'busId': qrBusId,
-            'boardedCount': nextCount,
-          }
-        },
+      final Map<String, dynamic>? outer =
+          jsonDecode(response.data!) as Map<String, dynamic>?;
+      final Map<String, dynamic>? payload =
+          decodeAwsJsonPayload(outer?['getParentWardStatus']);
+      if (payload == null || payload['success'] != true) {
+        return ParentWardStatusData(
+          success: false,
+          message: payload?['message'] as String? ?? 'Failed to load ward status.',
+        );
+      }
+
+      final String? boardedAtStr = payload['boardedAt'] as String?;
+      return ParentWardStatusData(
+        success: true,
+        wardName: payload['wardName'] as String?,
+        wardLoginId: payload['wardLoginId'] as String?,
+        assignedBusId: payload['assignedBusId'] as String?,
+        feePaid: payload['feePaid'] as bool? ?? true,
+        boarded: payload['boarded'] as bool? ?? false,
+        boardedAt: boardedAtStr != null ? DateTime.tryParse(boardedAtStr) : null,
+        boardedBusId: payload['boardedBusId'] as String?,
+        activeTripStatus: payload['activeTripStatus'] as String? ?? 'idle',
+        activeDriverId: payload['activeDriverId'] as String?,
       );
-      await Amplify.API.mutate(request: updateLocRequest).response;
-      _currentBusLocation = BusLocationData(
-        busId: _currentBusLocation.busId,
-        tripId: _currentBusLocation.tripId,
-        lat: _currentBusLocation.lat,
-        lng: _currentBusLocation.lng,
-        speed: _currentBusLocation.speed,
-        heading: _currentBusLocation.heading,
-        boardedCount: nextCount,
-        updatedAt: DateTime.now(),
-      );
-      _busLocationStreamController.add(_currentBusLocation);
     } catch (e) {
-      safePrint('Error updating boarded count: $e');
+      safePrint('Error fetching parent ward status: $e');
+      return const ParentWardStatusData(
+        success: false,
+        message: 'Network error loading ward status.',
+      );
     }
-
-    return BoardingResult(
-      isSuccess: true,
-      message: 'Boarding Verified! Attendance logged successfully.',
-      tripId: qrTripId,
-      busId: qrBusId,
-      studentId: studentId,
-      studentName: studentName,
-      boardedAt: boardedAt,
-    );
   }
 
   void dispose() {
+    _isDisposed = true;
     _locationSubscription?.cancel();
     _busLocationStreamController.close();
   }
