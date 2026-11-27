@@ -5,6 +5,8 @@ import { getAmplifyDataClientConfig } from '@aws-amplify/backend/function/runtim
 import type { Schema } from '../../data/resource';
 
 type AppSyncEvent = {
+  typeName?: string;
+  fieldName?: string;
   info?: { fieldName?: string };
   arguments?: Record<string, unknown>;
 };
@@ -643,7 +645,7 @@ async function handleGetParentWardStatus(
 
 export const handler = async (event: AppSyncEvent) => {
   const client = await getClient();
-  const fieldName = event.info?.fieldName;
+  const fieldName = event.fieldName ?? event.info?.fieldName;
   const args = event.arguments ?? {};
 
   switch (fieldName) {
