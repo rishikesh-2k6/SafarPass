@@ -3,13 +3,15 @@ import { transitGateway } from '../functions/transit-gateway/resource';
 
 const schema = a
   .schema({
-    // Server-only signing key storage; inherits only schema-level transitGateway access
+    // Server-only signing key storage; SYSTEM_ONLY group is never assigned to users,
+    // so only transitGateway Lambda (via schema-level IAM) can read/create it.
     SystemSecret: a
       .model({
         keyId: a.id().required(),
         secretValue: a.string().required(),
       })
-      .identifier(['keyId']),
+      .identifier(['keyId'])
+      .authorization((allow) => [allow.group('SYSTEM_ONLY')]),
 
     // Bus fleet registry; qrSecret is protected from public API callers
     Bus: a
