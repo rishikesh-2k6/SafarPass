@@ -31,9 +31,13 @@ class _ParentScreenState extends State<ParentScreen> {
   bool _followBus = true;
   String? _boardedTimestamp;
   String? _activeDriverId;
+  WardTripLegStatus _campusTrip =
+      const WardTripLegStatus(direction: 'to_campus');
+  WardTripLegStatus _homeTrip =
+      const WardTripLegStatus(direction: 'to_home');
 
   String get _wardName =>
-      widget.session.wardName ?? widget.session.wardLoginId ?? 'Student';
+      widget.session.wardName ?? widget.session.wardLoginId ?? 'Passenger';
   String get _wardLoginId =>
       widget.session.wardLoginId ?? widget.session.parentOfStudentId ?? '';
   String get _assignedBusId =>
@@ -91,6 +95,8 @@ class _ParentScreenState extends State<ParentScreen> {
       _isBoarded = boarded;
       _boardedTimestamp = formattedTime;
       _activeDriverId = status.activeDriverId;
+      _campusTrip = status.campusTrip;
+      _homeTrip = status.homeTrip;
       _isSos = status.activeTripStatus == 'sos';
       _boardingBannerStatus = boarded
           ? 'Boarded $busLabel at ${formattedTime ?? "today"}'
@@ -98,6 +104,16 @@ class _ParentScreenState extends State<ParentScreen> {
               ? 'Bus En Route • Waiting to Board'
               : 'Waiting to Board');
     });
+  }
+
+  String _formatShortTime(DateTime dt) {
+    final DateTime local = dt.toLocal();
+    final int hour = local.hour > 12
+        ? local.hour - 12
+        : (local.hour == 0 ? 12 : local.hour);
+    final String period = local.hour >= 12 ? 'PM' : 'AM';
+    final String minute = local.minute.toString().padLeft(2, '0');
+    return '$hour:$minute $period';
   }
 
   String _formatTime(DateTime dt) {
@@ -179,7 +195,7 @@ class _ParentScreenState extends State<ParentScreen> {
         ],
       ),
       body: SafeArea(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(16.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -214,8 +230,11 @@ class _ParentScreenState extends State<ParentScreen> {
                 const SizedBox(height: 12),
               ],
               _buildTopStatusCard(),
-              const SizedBox(height: 14),
-              Expanded(
+              const SizedBox(height: 12),
+              _buildDailyTripsSummaryCard(),
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 360,
                 child: _buildExpandedMapCard(),
               ),
             ],
@@ -248,6 +267,7 @@ class _ParentScreenState extends State<ParentScreen> {
         ],
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
             width: 44,
@@ -272,12 +292,11 @@ class _ParentScreenState extends State<ParentScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Expanded(
                       child: Text(
                         _boardingBannerStatus,
-                        overflow: TextOverflow.ellipsis,
                         style: TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w800,
@@ -306,30 +325,208 @@ class _ParentScreenState extends State<ParentScreen> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 3),
+                const SizedBox(height: 5),
                 Text(
                   isBoarded
-                      ? 'Ward: $_wardName ($_wardLoginId) • Boarded at ${_boardedTimestamp ?? "recently"}'
-                      : 'Ward: $_wardName ($_wardLoginId) • Driver: ${_activeDriverId ?? "Standby"}',
-                  overflow: TextOverflow.ellipsis,
+                      ? 'Ward: $_wardName ($_wardLoginId)\nBoarded at ${_boardedTimestamp ?? "recently"}'
+                      : 'Ward: $_wardName ($_wardLoginId)\nDriver: ${_activeDriverId ?? "Standby"}',
                   style: const TextStyle(
                     fontSize: 12,
-                    color: Color(0xFF64748B),
+                    height: 1.35,
+                    color: Color(0xFF475569),
                   ),
                 ),
                 if (activeDest.isNotEmpty) ...[
-                  const SizedBox(height: 3),
-                  Text(
-                    'Destination: $activeDest',
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF059669),
-                    ),
+                  const SizedBox(height: 5),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.only(top: 1),
+                        child: Icon(Icons.location_on_rounded,
+                            size: 14, color: Color(0xFF059669)),
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          'Destination: $activeDest',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF059669),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDailyTripsSummaryCard() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF0F172A).withValues(alpha: 0.03),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.route_rounded, size: 16, color: Color(0xFF059669)),
+              SizedBox(width: 6),
+              Text(
+                'TODAY\'S TRIP STATUS',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF475569),
+                  letterSpacing: 0.6,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: _buildTripLegTile(
+                  title: 'Trip 1 • Campus',
+                  reachedLabel: 'Reached Campus',
+                  leg: _campusTrip,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _buildTripLegTile(
+                  title: 'Trip 2 • Home',
+                  reachedLabel: 'Reached Home',
+                  leg: _homeTrip,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTripLegTile({
+    required String title,
+    required String reachedLabel,
+    required WardTripLegStatus leg,
+  }) {
+    final bool isCompleted = leg.status == 'completed';
+    final bool isActive = leg.status == 'active' || leg.status == 'sos';
+    final Color statusBg = isCompleted
+        ? const Color(0xFFECFDF5)
+        : (isActive ? const Color(0xFFEFF6FF) : const Color(0xFFF8FAFC));
+    final Color statusBorder = isCompleted
+        ? const Color(0xFFA7F3D0)
+        : (isActive ? const Color(0xFFBFDBFE) : const Color(0xFFE2E8F0));
+    final Color statusColor = isCompleted
+        ? const Color(0xFF065F46)
+        : (isActive ? const Color(0xFF1D4ED8) : const Color(0xFF64748B));
+
+    String legStateText;
+    if (isCompleted) {
+      legStateText = leg.endedAt != null
+          ? '$reachedLabel • ${_formatShortTime(leg.endedAt!)}'
+          : reachedLabel;
+    } else if (leg.status == 'sos') {
+      legStateText = 'SOS Alert Active';
+    } else if (isActive) {
+      legStateText = leg.startedAt != null
+          ? 'On the Way (${_formatShortTime(leg.startedAt!)})'
+          : 'On the Way';
+    } else {
+      legStateText = 'Not Started';
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: statusBg,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: statusBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF0F172A),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                isCompleted
+                    ? Icons.check_circle_rounded
+                    : (isActive
+                        ? Icons.directions_bus_rounded
+                        : Icons.schedule_rounded),
+                size: 14,
+                color: statusColor,
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  legStateText,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: statusColor,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+            decoration: BoxDecoration(
+              color: leg.wardBoarded
+                  ? const Color(0xFF10B981).withValues(alpha: 0.15)
+                  : Colors.white,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(
+                color: leg.wardBoarded
+                    ? const Color(0xFF10B981).withValues(alpha: 0.4)
+                    : const Color(0xFFCBD5E1),
+              ),
+            ),
+            child: Text(
+              leg.wardBoarded
+                  ? 'Ward Boarded${leg.boardedAt != null ? ' • ${_formatShortTime(leg.boardedAt!)}' : ''}'
+                  : 'Ward Not Boarded',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+                color: leg.wardBoarded
+                    ? const Color(0xFF065F46)
+                    : const Color(0xFF64748B),
+              ),
             ),
           ),
         ],

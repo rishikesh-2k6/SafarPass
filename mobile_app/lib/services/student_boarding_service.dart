@@ -89,6 +89,51 @@ class BoardingResult {
   });
 }
 
+class WardTripLegStatus {
+  final String? tripId;
+  final String direction;
+  final String status;
+  final String? destination;
+  final DateTime? startedAt;
+  final DateTime? endedAt;
+  final bool wardBoarded;
+  final DateTime? boardedAt;
+
+  const WardTripLegStatus({
+    this.tripId,
+    required this.direction,
+    this.status = 'not_started',
+    this.destination,
+    this.startedAt,
+    this.endedAt,
+    this.wardBoarded = false,
+    this.boardedAt,
+  });
+
+  factory WardTripLegStatus.fromJson(
+    dynamic raw, {
+    required String fallbackDirection,
+  }) {
+    if (raw is! Map) {
+      return WardTripLegStatus(direction: fallbackDirection);
+    }
+    final Map<String, dynamic> map = Map<String, dynamic>.from(raw);
+    final String? startStr = map['startedAt'] as String?;
+    final String? endStr = map['endedAt'] as String?;
+    final String? boardedStr = map['boardedAt'] as String?;
+    return WardTripLegStatus(
+      tripId: map['tripId'] as String?,
+      direction: (map['direction'] as String?) ?? fallbackDirection,
+      status: (map['status'] as String?) ?? 'not_started',
+      destination: map['destination'] as String?,
+      startedAt: startStr != null ? DateTime.tryParse(startStr) : null,
+      endedAt: endStr != null ? DateTime.tryParse(endStr) : null,
+      wardBoarded: map['wardBoarded'] as bool? ?? false,
+      boardedAt: boardedStr != null ? DateTime.tryParse(boardedStr) : null,
+    );
+  }
+}
+
 class ParentWardStatusData {
   final bool success;
   final String? message;
@@ -100,7 +145,10 @@ class ParentWardStatusData {
   final DateTime? boardedAt;
   final String? boardedBusId;
   final String activeTripStatus;
+  final String? activeTripDirection;
   final String? activeDriverId;
+  final WardTripLegStatus campusTrip;
+  final WardTripLegStatus homeTrip;
 
   const ParentWardStatusData({
     required this.success,
@@ -113,7 +161,10 @@ class ParentWardStatusData {
     this.boardedAt,
     this.boardedBusId,
     this.activeTripStatus = 'idle',
+    this.activeTripDirection,
     this.activeDriverId,
+    this.campusTrip = const WardTripLegStatus(direction: 'to_campus'),
+    this.homeTrip = const WardTripLegStatus(direction: 'to_home'),
   });
 }
 
@@ -477,7 +528,16 @@ class StudentBoardingService {
         boardedAt: boardedAtStr != null ? DateTime.tryParse(boardedAtStr) : null,
         boardedBusId: payload['boardedBusId'] as String?,
         activeTripStatus: payload['activeTripStatus'] as String? ?? 'idle',
+        activeTripDirection: payload['activeTripDirection'] as String?,
         activeDriverId: payload['activeDriverId'] as String?,
+        campusTrip: WardTripLegStatus.fromJson(
+          payload['campusTrip'],
+          fallbackDirection: 'to_campus',
+        ),
+        homeTrip: WardTripLegStatus.fromJson(
+          payload['homeTrip'],
+          fallbackDirection: 'to_home',
+        ),
       );
     } catch (e) {
       safePrint('Error fetching parent ward status: $e');

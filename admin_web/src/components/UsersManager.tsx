@@ -17,7 +17,8 @@ import {
   Check,
   AlertCircle,
   Lock,
-  ShieldCheck,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 
 type UserProfileType = Schema['UserProfile']['type'];
@@ -74,6 +75,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
   const [formAssignedBusId, setFormAssignedBusId] = useState('');
   const [formParentOfStudentId, setFormParentOfStudentId] = useState('');
   const [formFeePaid, setFormFeePaid] = useState(true);
+  const [showPin, setShowPin] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
@@ -115,6 +117,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
     setFormAssignedBusId(buses[0]?.busId || 'BUS_01');
     setFormParentOfStudentId('');
     setFormFeePaid(true);
+    setShowPin(false);
 
     if (defaultRole === 'student') {
       const studentNum = users.filter((u) => u.role === 'student').length + 1;
@@ -139,6 +142,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
     setFormAssignedBusId(user.assignedBusId || '');
     setFormParentOfStudentId(user.parentOfStudentId || '');
     setFormFeePaid(user.feePaid ?? true);
+    setShowPin(false);
     setIsModalOpen(true);
   };
 
@@ -378,7 +382,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
           <div className="flex items-center gap-2">
             <Users size={22} className="text-emerald-400" />
             <h2 className="text-xl font-bold text-slate-100">
-              Students & Transit Staff Directory
+              Passengers &amp; Transit Staff Directory
             </h2>
           </div>
           <span className="text-xs text-slate-400">
@@ -391,7 +395,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
             <Search size={15} className="search-icon" />
             <input
               type="text"
-              placeholder="Search by name, roll/ID, or bus..."
+              placeholder="Search by name, Login ID, or bus..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="search-input"
@@ -403,7 +407,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
             className="btn-secondary flex items-center gap-2 text-xs"
             onClick={handleSeed}
             disabled={isSeeding}
-            title="Seed 1 sample bus, 1 driver, 2 students, and 1 parent"
+            title="Seed 1 sample bus, 1 driver, 2 passengers, and 1 parent"
           >
             <Sparkles size={14} className="text-amber-400" />
             <span>{isSeeding ? 'Seeding...' : 'Load Sample Data'}</span>
@@ -435,7 +439,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
           onClick={() => setRoleFilter('student')}
         >
           <School size={13} className="text-blue-400" />
-          Students <span className="pill-count">{counts.student}</span>
+          Passengers <span className="pill-count">{counts.student}</span>
         </button>
         <button
           type="button"
@@ -463,8 +467,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
               <tr>
                 <th>Full Name</th>
                 <th>Role</th>
-                <th>Login ID / Roll No</th>
-                <th>PIN Security</th>
+                <th>Login ID</th>
                 <th>Assigned Bus</th>
                 <th>Fee Status / Relation</th>
                 <th style={{ textAlign: 'right' }}>Actions</th>
@@ -503,7 +506,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
                               : isDriver
                               ? 'Authorized Fleet Pilot'
                               : isStudent
-                              ? 'Verified Campus Scholar'
+                              ? 'Verified Transit Passenger'
                               : 'Campus User'}
                           </div>
                         </div>
@@ -511,17 +514,30 @@ export const UsersManager: FC<UsersManagerProps> = ({
                     </td>
 
                     <td>
-                      <span
-                        className={`role-badge ${
-                          isStudent
-                            ? 'role-student'
-                            : isDriver
-                            ? 'role-driver'
-                            : 'role-parent'
-                        }`}
-                      >
-                        {user.role.toUpperCase()}
-                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span
+                          className={`role-badge ${
+                            isStudent
+                              ? 'role-student'
+                              : isDriver
+                              ? 'role-driver'
+                              : 'role-parent'
+                          }`}
+                        >
+                          {isStudent ? 'PASSENGER' : user.role.toUpperCase()}
+                        </span>
+                        {isLocked && (
+                          <button
+                            type="button"
+                            onClick={() => handleUnlockUser(user)}
+                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-300 bg-red-500/15 border border-red-500/30 px-2 py-0.5 rounded hover:bg-red-500/25"
+                            title="Account temporarily locked; click to unlock"
+                          >
+                            <Lock size={11} />
+                            <span>Locked (Unlock)</span>
+                          </button>
+                        )}
+                      </div>
                     </td>
 
                     <td>
@@ -541,27 +557,6 @@ export const UsersManager: FC<UsersManagerProps> = ({
                             <Copy size={13} />
                           )}
                         </button>
-                      </div>
-                    </td>
-
-                    <td>
-                      <div className="flex items-center gap-1.5">
-                        {isLocked ? (
-                          <button
-                            type="button"
-                            onClick={() => handleUnlockUser(user)}
-                            className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-300 bg-red-500/15 border border-red-500/30 px-2 py-0.5 rounded hover:bg-red-500/25"
-                            title="Account temporarily locked; click to unlock"
-                          >
-                            <Lock size={11} />
-                            <span>Locked (Unlock)</span>
-                          </button>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-400/90 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded">
-                            <ShieldCheck size={11} />
-                            <span>SHA-256 Protected</span>
-                          </span>
-                        )}
                       </div>
                     </td>
 
@@ -637,7 +632,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
           <p className="text-sm text-slate-400 max-w-md text-center mt-1">
             {searchQuery
               ? `No user records match "${searchQuery}".`
-              : 'Add your first student, driver, or parent profile, or seed sample data.'}
+              : 'Add your first passenger, driver, or parent profile, or seed sample data.'}
           </p>
           <div className="flex items-center gap-3 mt-4">
             <button
@@ -689,7 +684,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
                     onClick={() => handleRoleChange('student')}
                   >
                     <School size={16} />
-                    <span>Student</span>
+                    <span>Passenger</span>
                   </button>
                   <button
                     type="button"
@@ -726,9 +721,9 @@ export const UsersManager: FC<UsersManagerProps> = ({
               <div className="form-group">
                 <label>
                   {formRole === 'student'
-                    ? 'Student Roll Number / Login ID'
+                    ? 'Passenger Login ID'
                     : formRole === 'driver'
-                    ? 'Driver ID / Badge Number'
+                    ? 'Driver Login ID'
                     : 'Parent Phone Number (Login ID)'}
                 </label>
                 <input
@@ -746,7 +741,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
                 />
               </div>
 
-              {/* PIN with CSPRNG Random button */}
+              {/* PIN with CSPRNG Random button and eye toggle */}
               <div className="form-group">
                 <div className="flex items-center justify-between">
                   <label>
@@ -757,22 +752,36 @@ export const UsersManager: FC<UsersManagerProps> = ({
                   <button
                     type="button"
                     className="text-xs text-emerald-400 hover:underline flex items-center gap-1"
-                    onClick={() => setFormPin(generateSecurePin())}
+                    onClick={() => {
+                      setFormPin(generateSecurePin());
+                      setShowPin(true);
+                    }}
                   >
                     <Sparkles size={11} />
                     Random PIN
                   </button>
                 </div>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  maxLength={6}
-                  required={!editingUser}
-                  placeholder={editingUser ? 'Leave blank to keep unchanged' : 'e.g. 4829'}
-                  value={formPin}
-                  onChange={(e) => setFormPin(e.target.value.replace(/\D/g, ''))}
-                  className="font-mono text-center tracking-widest text-base font-bold text-emerald-400"
-                />
+                <div className="relative flex items-center">
+                  <input
+                    type={showPin ? 'text' : 'password'}
+                    inputMode="numeric"
+                    maxLength={6}
+                    required={!editingUser}
+                    placeholder={editingUser ? 'Leave blank to keep unchanged' : 'e.g. 4829'}
+                    value={formPin}
+                    onChange={(e) => setFormPin(e.target.value.replace(/\D/g, ''))}
+                    className="w-full pr-10 font-mono text-center tracking-widest text-base font-bold text-emerald-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPin((prev) => !prev)}
+                    className="absolute right-3 text-slate-400 hover:text-slate-200 transition-colors"
+                    aria-label={showPin ? 'Hide PIN' : 'Show PIN'}
+                    title={showPin ? 'Hide PIN' : 'Show PIN'}
+                  >
+                    {showPin ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
               </div>
 
               {/* Assigned Bus */}
@@ -793,16 +802,16 @@ export const UsersManager: FC<UsersManagerProps> = ({
                 </select>
               </div>
 
-              {/* Parent of Student Dropdown */}
+              {/* Parent of Passenger Dropdown */}
               {formRole === 'parent' && (
                 <div className="form-group">
-                  <label>Linked Student (Child)</label>
+                  <label>Linked Passenger (Child / Ward)</label>
                   <select
                     value={formParentOfStudentId}
                     onChange={(e) => setFormParentOfStudentId(e.target.value)}
                     className="modal-select"
                   >
-                    <option value="">-- Select Child / Student --</option>
+                    <option value="">-- Select Linked Passenger --</option>
                     {studentUsers.map((s) => (
                       <option key={s.userId} value={s.loginId}>
                         {s.fullName} ({s.loginId})
@@ -813,7 +822,7 @@ export const UsersManager: FC<UsersManagerProps> = ({
                     )}
                   </select>
                   <span className="text-[11px] text-slate-400 mt-1">
-                    Enables parent to live-track their child&apos;s specific assigned bus.
+                    Enables parent to live-track their ward&apos;s specific assigned bus.
                   </span>
                 </div>
               )}

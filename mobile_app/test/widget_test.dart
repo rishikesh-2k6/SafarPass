@@ -9,18 +9,18 @@ void main() {
     await tester.pumpWidget(const VahanSyncApp());
     expect(find.text('VahanSync'), findsOneWidget);
     expect(find.text('Driver Mode'), findsOneWidget);
-    expect(find.text('Student Mode'), findsOneWidget);
+    expect(find.text('Passenger Mode'), findsOneWidget);
     expect(find.text('Parent Mode'), findsOneWidget);
     expect(find.text('Driver ID'), findsOneWidget);
 
-    // Switch to Student Mode
-    await tester.tap(find.text('Student Mode'));
+    // Switch to Passenger Mode
+    await tester.tap(find.text('Passenger Mode'));
     await tester.pump();
-    expect(find.text('Student Roll Number'), findsOneWidget);
-    expect(find.text('Login as Student'), findsOneWidget);
+    expect(find.text('Login ID'), findsOneWidget);
+    expect(find.text('Login as Passenger'), findsOneWidget);
 
     // Empty ID/PIN should trigger validation snackbar
-    await tester.tap(find.text('Login as Student'));
+    await tester.tap(find.text('Login as Passenger'));
     await tester.pump();
     expect(find.text('Please enter both your ID and PIN.'), findsOneWidget);
   });

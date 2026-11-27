@@ -486,8 +486,8 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
       'Log ID',
       'Trip ID',
       'Bus ID',
-      'Student ID',
-      'Student Name',
+      'Passenger ID',
+      'Passenger Name',
       'Scanned At',
       'Latitude',
       'Longitude',
@@ -627,7 +627,7 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
           onClick={() => setActiveTab('users')}
         >
           <Users size={16} className={activeTab === 'users' ? 'text-emerald-400' : ''} />
-          <span>Students &amp; Staff</span>
+          <span>Passengers &amp; Staff</span>
           <span className="tab-count-badge">{users.length}</span>
         </button>
       </nav>
@@ -774,7 +774,7 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
                               Speed: <strong>{(bus.speed ?? 0).toFixed(1)} km/h</strong>
                             </div>
                             <div>
-                              Boarded: <strong>{bus.boardedCount ?? 0} students</strong>
+                              Boarded: <strong>{bus.boardedCount ?? 0} passengers</strong>
                             </div>
                             <div>
                               Trip: <code>{bus.tripId || 'Active'}</code>
@@ -810,7 +810,7 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
                     <Search size={15} className="search-icon" />
                     <input
                       type="text"
-                      placeholder="Search student, ID, bus..."
+                      placeholder="Search passenger, ID, bus..."
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
                       className="search-input"
@@ -832,8 +832,8 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
                 <table className="ledger-table">
                   <thead>
                     <tr>
-                      <th>Student Name</th>
-                      <th>Student ID</th>
+                      <th>Passenger Name</th>
+                      <th>Login ID</th>
                       <th>Bus ID</th>
                       <th>Scanned At</th>
                       <th>GPS Coordinates</th>
@@ -844,7 +844,7 @@ const FleetPortal: FC<FleetPortalProps> = ({ adminEmail, onSignOut }) => {
                       filteredAttendanceLogs.map((log) => (
                         <tr key={log.id}>
                           <td className="font-semibold text-slate-100">
-                            {log.studentName || 'Student'}
+                            {log.studentName || 'Passenger'}
                           </td>
                           <td className="text-slate-400 font-mono text-xs">
                             {log.studentId}

@@ -50,6 +50,7 @@ const schema = a
         driverId: a.string().required(),
         status: a.string().required(),
         destination: a.string(),
+        tripDirection: a.string(),
         startedAt: a.datetime(),
         endedAt: a.datetime(),
       })
@@ -70,6 +71,7 @@ const schema = a
         heading: a.float().default(0),
         boardedCount: a.integer().default(0),
         destination: a.string(),
+        tripDirection: a.string(),
       })
       .identifier(['busId'])
       .authorization((allow) => [
@@ -113,6 +115,7 @@ const schema = a
         speed: a.float(),
         heading: a.float(),
         destination: a.string(),
+        tripDirection: a.string(),
       })
       .returns(a.json())
       .authorization((allow) => [allow.publicApiKey()])

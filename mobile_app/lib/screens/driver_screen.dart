@@ -24,6 +24,8 @@ class _DriverScreenState extends State<DriverScreen> {
   bool _isTripActive = false;
   bool _isLoading = false;
   bool _simulateMovement = false;
+  String _tripDirection =
+      DateTime.now().hour < 12 ? 'to_campus' : 'to_home';
   String _currentQrPayload = '';
   String _currentDestination = '';
   int _boardedCount = 0;
@@ -128,10 +130,14 @@ class _DriverScreenState extends State<DriverScreen> {
     try {
       _telemetryService.simulateMovement = _simulateMovement;
       final String destText = _destinationController.text.trim();
-      await _telemetryService.startTrip(destination: destText);
+      await _telemetryService.startTrip(
+        destination: destText,
+        tripDirection: _tripDirection,
+      );
       if (mounted) {
         setState(() {
           _isTripActive = true;
+          _tripDirection = _telemetryService.tripDirection;
           _currentQrPayload = _telemetryService.currentQrPayload;
           _currentDestination = _telemetryService.currentDestination;
           _boardedCount = _telemetryService.boardedCount;
@@ -149,6 +155,16 @@ class _DriverScreenState extends State<DriverScreen> {
         });
       }
     }
+  }
+
+  String _formatClockTime(DateTime dt) {
+    final DateTime local = dt.toLocal();
+    final int hour = local.hour > 12
+        ? local.hour - 12
+        : (local.hour == 0 ? 12 : local.hour);
+    final String period = local.hour >= 12 ? 'PM' : 'AM';
+    final String minute = local.minute.toString().padLeft(2, '0');
+    return '$hour:$minute $period';
   }
 
   Future<void> _handleEditDestination() async {
@@ -573,7 +589,39 @@ class _DriverScreenState extends State<DriverScreen> {
                       color: Color(0xFF64748B),
                     ),
                   ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 18),
+
+                  // Trip Direction Selector (To Campus vs To Home)
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF1F5F9),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _buildDirectionOption(
+                            label: 'To Campus',
+                            icon: Icons.school_rounded,
+                            isSelected: _tripDirection == 'to_campus',
+                            onTap: () =>
+                                setState(() => _tripDirection = 'to_campus'),
+                          ),
+                        ),
+                        Expanded(
+                          child: _buildDirectionOption(
+                            label: 'To Home',
+                            icon: Icons.home_rounded,
+                            isSelected: _tripDirection == 'to_home',
+                            onTap: () =>
+                                setState(() => _tripDirection = 'to_home'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
 
                   // Destination Input before starting trip
                   TextField(
@@ -588,7 +636,7 @@ class _DriverScreenState extends State<DriverScreen> {
                           TextStyle(fontSize: 13, color: Color(0xFF94A3B8)),
                     ),
                   ),
-                  const SizedBox(height: 26),
+                  const SizedBox(height: 24),
 
                   Container(
                     width: 185,
@@ -638,7 +686,38 @@ class _DriverScreenState extends State<DriverScreen> {
                       ),
                     ),
                   ),
-                  const SizedBox(height: 24),
+                  if (_telemetryService.lastTripStartedAt != null &&
+                      _telemetryService.lastTripEndedAt != null) ...[
+                    const SizedBox(height: 18),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF8FAFC),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFFE2E8F0)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.schedule_rounded,
+                              size: 16, color: Color(0xFF059669)),
+                          const SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              'Last Trip (${_telemetryService.lastTripDirection == 'to_home' ? 'To Home' : 'To Campus'}) • Start: ${_formatClockTime(_telemetryService.lastTripStartedAt!)} • Stop: ${_formatClockTime(_telemetryService.lastTripEndedAt!)}',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF334155),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 20),
                   Text(
                     'Tap to broadcast live telemetry & activate attendance',
                     textAlign: TextAlign.center,
@@ -754,6 +833,53 @@ class _DriverScreenState extends State<DriverScreen> {
           ),
           const SizedBox(height: 10),
 
+          // Trip Start Time & Direction Strip (Start time only; distance restricted to Admin)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFFE2E8F0)),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.schedule_rounded,
+                        size: 17, color: Color(0xFF059669)),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Started: ${_telemetryService.tripStartedAt != null ? _formatClockTime(_telemetryService.tripStartedAt!) : "Just now"}',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF0F172A),
+                      ),
+                    ),
+                  ],
+                ),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFECFDF5),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    _tripDirection == 'to_home' ? 'To Home' : 'To Campus',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF065F46),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+
           // Live Destination Banner with inline Edit
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -827,7 +953,7 @@ class _DriverScreenState extends State<DriverScreen> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     const Text(
-                      'Student Pass QR',
+                      'Passenger Pass QR',
                       style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w800,
@@ -1014,6 +1140,57 @@ class _DriverScreenState extends State<DriverScreen> {
           ),
           const SizedBox(height: 16),
         ],
+      ),
+    );
+  }
+
+  Widget _buildDirectionOption({
+    required String label,
+    required IconData icon,
+    required bool isSelected,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(9),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        decoration: BoxDecoration(
+          color: isSelected ? Colors.white : Colors.transparent,
+          borderRadius: BorderRadius.circular(9),
+          boxShadow: isSelected
+              ? [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.05),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ]
+              : null,
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              icon,
+              size: 16,
+              color: isSelected
+                  ? const Color(0xFF059669)
+                  : const Color(0xFF64748B),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                color: isSelected
+                    ? const Color(0xFF0F172A)
+                    : const Color(0xFF64748B),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

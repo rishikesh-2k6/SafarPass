@@ -152,6 +152,18 @@ function haversineMeters(
   return R * c;
 }
 
+function toIstDateKey(isoOrNow?: string | null): string {
+  const ms = isoOrNow ? Date.parse(isoOrNow) : Date.now();
+  const safeMs = Number.isNaN(ms) ? Date.now() : ms;
+  // Offset +05:30 IST so morning campus trips match local calendar day
+  return new Date(safeMs + 19800000).toISOString().slice(0, 10);
+}
+
+function normalizeTripDirection(raw: unknown): 'to_campus' | 'to_home' {
+  const clean = String(raw ?? '').trim().toLowerCase();
+  return clean === 'to_home' ? 'to_home' : 'to_campus';
+}
+
 function isValidCoordinate(lat: unknown, lng: unknown): boolean {
   return (
     typeof lat === 'number' &&
@@ -326,6 +338,7 @@ async function handleDriverTripAction(
     );
 
     const rawDest = typeof args.destination === 'string' ? args.destination.trim() : '';
+    const tripDirection = normalizeTripDirection(args.tripDirection);
     const { data: busRecord } = await client.models.Bus.get({ busId });
     const resolvedDestination = rawDest || busRecord?.destination || null;
 
@@ -338,6 +351,7 @@ async function handleDriverTripAction(
       driverId,
       status: 'active',
       destination: resolvedDestination,
+      tripDirection,
       startedAt: nowIso,
     });
     if (errors?.length || !createdTrip) {
@@ -362,6 +376,7 @@ async function handleDriverTripAction(
         heading: 0,
         boardedCount: 0,
         destination: resolvedDestination,
+        tripDirection,
       });
     } else {
       await client.models.BusLocation.create({
@@ -373,6 +388,7 @@ async function handleDriverTripAction(
         heading: 0,
         boardedCount: 0,
         destination: resolvedDestination,
+        tripDirection,
       });
     }
 
@@ -381,6 +397,8 @@ async function handleDriverTripAction(
       tripId: createdTrip.id,
       status: 'active',
       destination: resolvedDestination,
+      tripDirection,
+      startedAt: nowIso,
       boardedCount: 0,
     };
   }
@@ -474,10 +492,11 @@ async function handleDriverTripAction(
   }
 
   if (action === 'end') {
+    const endedAt = new Date().toISOString();
     await client.models.Trip.update({
       id: tripId,
       status: 'completed',
-      endedAt: new Date().toISOString(),
+      endedAt,
     });
     const { data: existingLoc } = await client.models.BusLocation.get({ busId });
     if (existingLoc && existingLoc.tripId === tripId) {
@@ -486,7 +505,12 @@ async function handleDriverTripAction(
         speed: 0,
       });
     }
-    return { success: true, tripStatus: 'completed' };
+    return {
+      success: true,
+      tripStatus: 'completed',
+      startedAt: trip.startedAt ?? null,
+      endedAt,
+    };
   }
 
   return { success: false, message: 'Unsupported trip action.' };
@@ -670,13 +694,61 @@ async function handleGetParentWardStatus(
     (t) => t.status === 'active' || t.status === 'sos',
   );
 
-  const todayPrefix = new Date().toISOString().slice(0, 10);
+  const todayKey = toIstDateKey();
   const sortedLogs = [...(logs ?? [])].sort((a, b) =>
     (b.scannedAt ?? '').localeCompare(a.scannedAt ?? ''),
   );
   const relevantLog =
     (activeTrip ? sortedLogs.find((l) => l.tripId === activeTrip.id) : undefined) ??
-    sortedLogs.find((l) => (l.scannedAt ?? '').startsWith(todayPrefix));
+    sortedLogs.find((l) => l.scannedAt && toIstDateKey(l.scannedAt) === todayKey);
+
+  const todayTrips = [...(busTrips ?? [])]
+    .filter((t) => {
+      const refIso = t.startedAt ?? t.endedAt;
+      return refIso ? toIstDateKey(refIso) === todayKey : false;
+    })
+    .sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''));
+
+  const buildLegSummary = (
+    trip: (typeof todayTrips)[number] | undefined,
+    direction: 'to_campus' | 'to_home',
+  ) => {
+    if (!trip) {
+      return {
+        tripId: null,
+        direction,
+        status: 'not_started',
+        destination: null,
+        startedAt: null,
+        endedAt: null,
+        wardBoarded: false,
+        boardedAt: null,
+      };
+    }
+    const legLog = sortedLogs.find((l) => l.tripId === trip.id);
+    return {
+      tripId: trip.id,
+      direction,
+      status: trip.status,
+      destination: trip.destination ?? null,
+      startedAt: trip.startedAt ?? null,
+      endedAt: trip.endedAt ?? null,
+      wardBoarded: Boolean(legLog),
+      boardedAt: legLog?.scannedAt ?? null,
+    };
+  };
+
+  const explicitCampusTrips = todayTrips.filter((t) => t.tripDirection === 'to_campus');
+  const explicitHomeTrips = todayTrips.filter((t) => t.tripDirection === 'to_home');
+  const legacyTrips = todayTrips.filter(
+    (t) => t.tripDirection !== 'to_campus' && t.tripDirection !== 'to_home',
+  );
+
+  const campusTripRecord =
+    explicitCampusTrips[explicitCampusTrips.length - 1] ?? legacyTrips[0];
+  const homeTripRecord =
+    explicitHomeTrips[explicitHomeTrips.length - 1] ??
+    (legacyTrips.length > 1 ? legacyTrips[legacyTrips.length - 1] : undefined);
 
   return {
     success: true,
@@ -688,7 +760,10 @@ async function handleGetParentWardStatus(
     boardedAt: relevantLog?.scannedAt ?? null,
     boardedBusId: relevantLog?.busId ?? null,
     activeTripStatus: activeTrip?.status ?? 'idle',
+    activeTripDirection: activeTrip?.tripDirection ?? null,
     activeDriverId: activeTrip?.driverId ?? null,
+    campusTrip: buildLegSummary(campusTripRecord, 'to_campus'),
+    homeTrip: buildLegSummary(homeTripRecord, 'to_home'),
   };
 }
 

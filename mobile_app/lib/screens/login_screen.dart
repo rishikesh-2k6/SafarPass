@@ -32,7 +32,7 @@ class _LoginScreenState extends State<LoginScreen> {
       case UserRole.driver:
         return 'Driver ID';
       case UserRole.student:
-        return 'Student Roll Number';
+        return 'Login ID';
       case UserRole.parent:
         return 'Parent Phone Number';
     }
@@ -65,7 +65,7 @@ class _LoginScreenState extends State<LoginScreen> {
       case UserRole.driver:
         return 'Login as Driver';
       case UserRole.student:
-        return 'Login as Student';
+        return 'Login as Passenger';
       case UserRole.parent:
         return 'Login as Parent';
     }
@@ -231,8 +231,8 @@ class _LoginScreenState extends State<LoginScreen> {
                           Expanded(
                             child: _buildRoleTab(
                               role: UserRole.student,
-                              label: 'Student Mode',
-                              icon: Icons.school_rounded,
+                              label: 'Passenger Mode',
+                              icon: Icons.directions_walk_rounded,
                             ),
                           ),
                           Expanded(

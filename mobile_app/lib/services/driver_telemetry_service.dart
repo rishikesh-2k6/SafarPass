@@ -35,6 +35,12 @@ class DriverTelemetryService {
   bool isTripActive = false;
   String currentQrPayload = '';
   String currentDestination = '';
+  String tripDirection =
+      DateTime.now().hour < 12 ? 'to_campus' : 'to_home';
+  DateTime? tripStartedAt;
+  DateTime? lastTripStartedAt;
+  DateTime? lastTripEndedAt;
+  String? lastTripDirection;
   int boardedCount = 0;
 
   double currentLat = 16.4632;
@@ -159,6 +165,7 @@ class DriverTelemetryService {
     double? speed,
     double? heading,
     String? destination,
+    String? tripDirection,
   }) async {
     const String mutation = r'''
       mutation DriverTripAction(
@@ -170,6 +177,7 @@ class DriverTelemetryService {
         $speed: Float
         $heading: Float
         $destination: String
+        $tripDirection: String
       ) {
         driverTripAction(
           sessionToken: $sessionToken
@@ -180,6 +188,7 @@ class DriverTelemetryService {
           speed: $speed
           heading: $heading
           destination: $destination
+          tripDirection: $tripDirection
         )
       }
     ''';
@@ -195,6 +204,7 @@ class DriverTelemetryService {
         'speed': ?speed,
         'heading': ?heading,
         'destination': ?destination,
+        'tripDirection': ?tripDirection,
       },
       authorizationMode: APIAuthorizationType.apiKey,
     );
@@ -210,7 +220,7 @@ class DriverTelemetryService {
     return decodeAwsJsonPayload(outer?['driverTripAction']);
   }
 
-  Future<void> startTrip({String? destination}) async {
+  Future<void> startTrip({String? destination, String? tripDirection}) async {
     if (_qrSecret.isEmpty) {
       throw 'Missing Bus QR signing secret for $busId. Contact fleet admin.';
     }
@@ -221,12 +231,17 @@ class DriverTelemetryService {
     }
 
     final String cleanDest = (destination ?? currentDestination).trim();
+    final String resolvedDirection =
+        (tripDirection == 'to_home' || tripDirection == 'to_campus')
+            ? tripDirection!
+            : this.tripDirection;
 
     final Map<String, dynamic>? result = await _invokeDriverTripAction(
       action: 'start',
       lat: currentLat,
       lng: currentLng,
       destination: cleanDest.isNotEmpty ? cleanDest : null,
+      tripDirection: resolvedDirection,
     );
 
     if (result == null || result['success'] != true) {
@@ -237,6 +252,13 @@ class DriverTelemetryService {
     if (activeTripId == null || activeTripId!.isEmpty) {
       throw 'Server did not return an active tripId.';
     }
+
+    this.tripDirection =
+        (result['tripDirection'] as String?) ?? resolvedDirection;
+    final String? serverStartedStr = result['startedAt'] as String?;
+    tripStartedAt = serverStartedStr != null
+        ? (DateTime.tryParse(serverStartedStr)?.toLocal() ?? DateTime.now())
+        : DateTime.now();
 
     final String? serverDest = result['destination'] as String?;
     if (serverDest != null && serverDest.isNotEmpty) {
@@ -571,18 +593,30 @@ class DriverTelemetryService {
       gpsStatus.value = 'Trip Concluded';
     }
 
+    DateTime resolvedEnd = DateTime.now();
     if (activeTripId != null) {
       try {
-        await _invokeDriverTripAction(
+        final Map<String, dynamic>? res = await _invokeDriverTripAction(
           action: 'end',
           tripId: activeTripId,
         );
+        final String? serverEndStr = res?['endedAt'] as String?;
+        if (serverEndStr != null) {
+          resolvedEnd =
+              DateTime.tryParse(serverEndStr)?.toLocal() ?? resolvedEnd;
+        }
       } catch (e) {
         safePrint('Error completing trip: $e');
       }
       activeTripId = null;
     }
 
+    if (tripStartedAt != null) {
+      lastTripStartedAt = tripStartedAt;
+      lastTripEndedAt = resolvedEnd;
+      lastTripDirection = tripDirection;
+    }
+    tripStartedAt = null;
     isTripActive = false;
     currentQrPayload = '';
     if (!_isDisposed) {

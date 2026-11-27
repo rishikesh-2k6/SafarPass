@@ -83,6 +83,11 @@ export const ActiveTripsPanel: FC<ActiveTripsPanelProps> = ({
                   >
                     {isSos ? 'SOS ALERT' : 'ON ROAD'}
                   </span>
+                  {trip.tripDirection && (
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                      {trip.tripDirection === 'to_home' ? 'To Home' : 'To Campus'}
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-1.5">
                   <button

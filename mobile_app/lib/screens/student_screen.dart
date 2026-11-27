@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/user_session.dart';
 import '../services/student_boarding_service.dart';
@@ -25,7 +24,6 @@ class _StudentScreenState extends State<StudentScreen> {
   late BusLocationData _busLocation;
   StreamSubscription<BusLocationData>? _busLocationSub;
 
-  int _selectedTab = 0; // 0: Scan Bus QR, 1: My ID Pass
   bool _bypassGps = false; // Enforce 50m GPS proximity by default in production
   bool _isProcessingScan = false;
   bool _isSatellite = false;
@@ -86,7 +84,7 @@ class _StudentScreenState extends State<StudentScreen> {
   }
 
   Future<void> _handleBarcodeDetected(BarcodeCapture capture) async {
-    if (_isProcessingScan || _selectedTab != 0) return;
+    if (_isProcessingScan) return;
 
     final List<Barcode> barcodes = capture.barcodes;
     for (final barcode in barcodes) {
@@ -528,46 +526,37 @@ class _StudentScreenState extends State<StudentScreen> {
                         ],
                       ),
                       child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           Container(
-                            padding: const EdgeInsets.all(4),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 10),
                             decoration: BoxDecoration(
-                              color: const Color(0xFFF1F5F9),
+                              color: const Color(0xFFECFDF5),
                               borderRadius: BorderRadius.circular(12),
+                              border:
+                                  Border.all(color: const Color(0xFFA7F3D0)),
                             ),
-                            child: Row(
+                            child: const Row(
                               children: [
+                                Icon(Icons.qr_code_scanner_rounded,
+                                    size: 18, color: Color(0xFF059669)),
+                                SizedBox(width: 8),
                                 Expanded(
-                                  child: _buildTabPill(
-                                    title: 'Scan Bus QR',
-                                    icon: Icons.qr_code_scanner_rounded,
-                                    isSelected: _selectedTab == 0,
-                                    onTap: () {
-                                      setState(() => _selectedTab = 0);
-                                      if (_boardingResult?.isSuccess != true) {
-                                        _scannerController.start();
-                                      }
-                                    },
-                                  ),
-                                ),
-                                Expanded(
-                                  child: _buildTabPill(
-                                    title: 'My ID Pass',
-                                    icon: Icons.badge_rounded,
-                                    isSelected: _selectedTab == 1,
-                                    onTap: () {
-                                      setState(() => _selectedTab = 1);
-                                      _scannerController.stop();
-                                    },
+                                  child: Text(
+                                    'Scan Bus QR on boarding to verify attendance & unlock your Trip Pass and SOS.',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: Color(0xFF065F46),
+                                    ),
                                   ),
                                 ),
                               ],
                             ),
                           ),
-                          const SizedBox(height: 16),
-                          _selectedTab == 0
-                              ? _buildScanQrTab()
-                              : _buildMyIdPassTab(),
+                          const SizedBox(height: 14),
+                          _buildScanQrTab(),
                         ],
                       ),
                     ),
@@ -599,57 +588,6 @@ class _StudentScreenState extends State<StudentScreen> {
         Icons.directions_bus_rounded,
         color: Colors.white,
         size: 26,
-      ),
-    );
-  }
-
-  Widget _buildTabPill({
-    required String title,
-    required IconData icon,
-    required bool isSelected,
-    required VoidCallback onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(9),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 9),
-        decoration: BoxDecoration(
-          color: isSelected ? Colors.white : Colors.transparent,
-          borderRadius: BorderRadius.circular(9),
-          boxShadow: isSelected
-              ? [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.05),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  ),
-                ]
-              : null,
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              icon,
-              size: 16,
-              color: isSelected
-                  ? const Color(0xFF0F172A)
-                  : const Color(0xFF64748B),
-            ),
-            const SizedBox(width: 6),
-            Text(
-              title,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                color: isSelected
-                    ? const Color(0xFF0F172A)
-                    : const Color(0xFF64748B),
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -841,7 +779,7 @@ class _StudentScreenState extends State<StudentScreen> {
             style: TextStyle(fontSize: 11, color: Color(0xFF047857)),
           ),
           const Divider(height: 20),
-          _buildPassRow('Student', '$_studentName ($_studentId)'),
+          _buildPassRow('Passenger', '$_studentName ($_studentId)'),
           const SizedBox(height: 6),
           _buildPassRow('Bus Assigned', result.busId ?? _assignedBusId),
           const SizedBox(height: 6),
@@ -892,80 +830,6 @@ class _StudentScreenState extends State<StudentScreen> {
               fontWeight: FontWeight.bold,
               color: Color(0xFF0F172A),
             ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildMyIdPassTab() {
-    final String fallbackQrData = '$_studentId|$_assignedBusId';
-
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: const Color(0xFFF8FAFC),
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: const Color(0xFFE2E8F0)),
-          ),
-          child: QrImageView(
-            data: fallbackQrData,
-            version: QrVersions.auto,
-            size: 180.0,
-          ),
-        ),
-        const SizedBox(height: 14),
-        Text(
-          _studentName,
-          style: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
-            color: Color(0xFF0F172A),
-          ),
-        ),
-        const SizedBox(height: 2),
-        Text(
-          'ID: $_studentId • Bus $_assignedBusId',
-          style: const TextStyle(
-            fontSize: 12,
-            color: Color(0xFF64748B),
-          ),
-        ),
-        const SizedBox(height: 8),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-          decoration: BoxDecoration(
-            color: _feePaid
-                ? const Color(0xFFECFDF5)
-                : const Color(0xFFFEF2F2),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: _feePaid
-                  ? const Color(0xFFA7F3D0)
-                  : const Color(0xFFFECACA),
-            ),
-          ),
-          child: Text(
-            _feePaid ? 'FEE STATUS: VERIFIED' : 'FEE STATUS: PENDING',
-            style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.bold,
-              color: _feePaid
-                  ? const Color(0xFF065F46)
-                  : const Color(0xFF991B1B),
-              letterSpacing: 0.5,
-            ),
-          ),
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          'Offline Fallback Pass: Display to driver if bus scanner is offline',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 11,
-            color: Color(0xFF94A3B8),
           ),
         ),
       ],

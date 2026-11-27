@@ -14,6 +14,8 @@ import {
   AlertTriangle,
   Bus as BusIcon,
   KeyRound,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 
 interface AdminSessionInfo {
@@ -31,6 +33,8 @@ export const AdminAuthGate: FC<AdminAuthGateProps> = ({ children }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
   const [needsNewPassword, setNeedsNewPassword] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -224,14 +228,26 @@ export const AdminAuthGate: FC<AdminAuthGateProps> = ({ children }) => {
                   <Lock size={13} />
                   Password
                 </label>
-                <input
-                  type="password"
-                  required
-                  autoComplete="current-password"
-                  placeholder="••••••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
+                <div className="relative flex items-center">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    autoComplete="current-password"
+                    placeholder="••••••••••••"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((prev) => !prev)}
+                    className="absolute right-3 text-slate-400 hover:text-slate-200 transition-colors"
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    title={showPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
               </div>
             </>
           ) : (
@@ -240,15 +256,27 @@ export const AdminAuthGate: FC<AdminAuthGateProps> = ({ children }) => {
                 <KeyRound size={13} />
                 Set New Permanent Password
               </label>
-              <input
-                type="password"
-                required
-                minLength={8}
-                autoComplete="new-password"
-                placeholder="Min 8 chars, upper, lower, number, symbol"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-              />
+              <div className="relative flex items-center">
+                <input
+                  type={showNewPassword ? 'text' : 'password'}
+                  required
+                  minLength={8}
+                  autoComplete="new-password"
+                  placeholder="Min 8 chars, upper, lower, number, symbol"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  className="w-full pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewPassword((prev) => !prev)}
+                  className="absolute right-3 text-slate-400 hover:text-slate-200 transition-colors"
+                  aria-label={showNewPassword ? 'Hide password' : 'Show password'}
+                  title={showNewPassword ? 'Hide password' : 'Show password'}
+                >
+                  {showNewPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
             </div>
           )}
 
