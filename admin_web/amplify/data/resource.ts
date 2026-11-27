@@ -40,10 +40,7 @@ const schema = a
         lockedUntil: a.datetime(),
       })
       .identifier(['userId'])
-      .secondaryIndexes((index) => [
-        index('loginId'),
-        index('assignedBusId'),
-      ])
+      .secondaryIndexes((index) => [index('loginId')])
       .authorization((allow) => [allow.group('ADMINS')]),
 
     Trip: a
@@ -54,7 +51,7 @@ const schema = a
         startedAt: a.datetime(),
         endedAt: a.datetime(),
       })
-      .secondaryIndexes((index) => [index('busId'), index('status')])
+      .secondaryIndexes((index) => [index('busId')])
       .authorization((allow) => [
         allow.group('ADMINS'),
         allow.publicApiKey().to(['read']),
@@ -88,7 +85,7 @@ const schema = a
         scanLng: a.float(),
         scannedAt: a.datetime(),
       })
-      .secondaryIndexes((index) => [index('tripId'), index('studentId')])
+      .secondaryIndexes((index) => [index('studentId')])
       .authorization((allow) => [allow.group('ADMINS')]),
 
     mobileLogin: a
